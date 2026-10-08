@@ -1,0 +1,36 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install Playwright
+        run: |
+          pip install playwright==1.47.0
+          python -m playwright install --with-deps chromium
+      - name: index.html matches src/ and fw/
+        run: python tools/build.py --check
+      - name: Unit tests (SPC1 parser, MD5, SLIP)
+        run: |
+          python test/gen.py
+          node test/run.mjs
+          node test/md5test.mjs
+      - name: Browser tests against an emulated board
+        run: |
+          python test/live.py
+          python test/flash.py
+          python test/reflash.py
+          python test/features.py
+          python test/wrongport.py
+          python test/rack.py

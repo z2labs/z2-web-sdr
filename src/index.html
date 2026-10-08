@@ -1,0 +1,1732 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Z2 Web SDR</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Barlow:wght@400;500;600&family=Barlow+Semi+Condensed:wght@500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+/* Layout: one-screen instrument. Header with the frequency readout, spectrum over waterfall
+   on the left, a control rack on the right (a bottom sheet on phones). Single dark look by
+   choice: a spectrum display reads best on a dark ground. */
+:root {
+  --bg: #0a0e11;
+  --panel: #10161a;
+  --raise: #172026;
+  --line: #22303a;
+  --fg: #d6e1e5;
+  --muted: #7c8f99;
+  --dim: #4b5c66;
+  --accent: #f0a443;        /* marker / readout amber */
+  --accent-ink: #1b1305;
+  --trace: #93d8e6;
+  --trace-fill: rgba(147, 216, 230, 0.16);
+  --peak: #e7c35a;
+  --ok: #5cc88a;
+  --warn: #e7c35a;
+  --bad: #e5624f;
+  --plot: #070a0c;
+  --grid: rgba(150, 180, 195, 0.10);
+  --font-ui: "Barlow", "Segoe UI", system-ui, sans-serif;
+  --font-label: "Barlow Semi Condensed", "Arial Narrow", "Segoe UI", sans-serif;
+  --font-num: "IBM Plex Mono", ui-monospace, "Cascadia Mono", Consolas, monospace;
+  color-scheme: dark;
+}
+html, body { height: 100%; }
+body {
+  margin: 0; background: var(--bg); color: var(--fg);
+  font: 14px/1.4 var(--font-ui);
+  overflow: hidden;
+}
+* { box-sizing: border-box; }
+[hidden] { display: none !important; }
+button, input, select { font: inherit; color: inherit; }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+.app {
+  height: 100%; display: grid;
+  grid-template-rows: auto 1fr;
+  grid-template-columns: 1fr 312px;
+  grid-template-areas: "head head" "view rack";
+  gap: 10px; padding: 10px 16px 12px;
+  transition: grid-template-columns 0.25s ease, column-gap 0.25s ease;
+}
+/* settings rack tucked away after a while without use (desktop) */
+.app.rack-away { grid-template-columns: 1fr 0px; column-gap: 0; }
+.app.rack-away .rack { opacity: 0; pointer-events: none; }
+.racktab {
+  position: absolute; right: 0; top: 50%; transform: translateY(-50%); z-index: 5;
+  display: flex; align-items: center; gap: 6px; writing-mode: vertical-rl;
+  padding: 12px 5px; border: 1px solid var(--line); border-right: 0; border-radius: 8px 0 0 8px;
+  background: rgba(16, 22, 26, 0.88); color: var(--muted); cursor: pointer;
+  font: 600 11px var(--font-label); letter-spacing: 0.14em; text-transform: uppercase;
+}
+.racktab:hover { color: var(--fg); border-color: var(--dim); }
+.racktab svg { width: 13px; height: 13px; fill: currentColor; }
+.rackbar { display: flex; align-items: center; justify-content: space-between; padding: 0 2px; flex: 0 0 auto; }
+.rackbar span { font: 600 11px var(--font-label); letter-spacing: 0.14em; text-transform: uppercase; color: var(--muted); }
+.pin { width: 30px; height: 26px; display: inline-grid; place-items: center; border: 1px solid transparent; border-radius: 6px; background: none; color: var(--muted); cursor: pointer; }
+.pin:hover { color: var(--fg); border-color: var(--line); }
+.pin[aria-pressed="true"] { color: var(--accent); background: var(--raise); border-color: var(--line); }
+.pin svg { width: 15px; height: 15px; fill: currentColor; }
+header.top {
+  grid-area: head; display: flex; align-items: center; gap: 16px; flex-wrap: wrap;
+  min-width: 0;
+}
+.brand { display: flex; align-items: baseline; gap: 8px; }
+.brand b { font: 600 17px var(--font-label); letter-spacing: 0.02em; }
+.brand span { font: 500 11px var(--font-label); letter-spacing: 0.12em; text-transform: uppercase; color: var(--muted); }
+
+/* Frequency readout: every digit tunes (wheel, tap upper/lower half, arrow keys) */
+.readout {
+  display: flex; align-items: baseline; gap: 10px; margin-inline: auto;
+  padding: 2px 14px; border-radius: 6px; background: var(--plot); border: 1px solid var(--line);
+}
+.digits { font: 500 30px/1.2 var(--font-num); letter-spacing: 0.01em; display: flex; user-select: none; }
+.digits .d { cursor: ns-resize; padding: 0 1px; border-radius: 3px; color: var(--fg); position: relative; touch-action: none; }
+.digits .d.lead { color: var(--dim); }
+.digits .d:hover { background: var(--raise); }
+.digits .sep { color: var(--dim); padding: 0 2px; }
+.readout .unit { font: 500 13px var(--font-label); color: var(--muted); letter-spacing: 0.08em; }
+
+.conn { display: flex; align-items: center; gap: 10px; }
+.chip {
+  display: inline-flex; align-items: center; gap: 6px; height: 26px; padding: 0 10px;
+  border-radius: 13px; font: 600 11px var(--font-label); letter-spacing: 0.1em; text-transform: uppercase;
+  background: var(--raise); color: var(--muted); white-space: nowrap;
+}
+.chip i { width: 7px; height: 7px; border-radius: 50%; background: var(--dim); }
+.chip.demo i { background: var(--accent); }
+.chip.live i { background: var(--ok); box-shadow: 0 0 8px var(--ok); }
+.chip.busy i { background: var(--warn); }
+.chip.err i { background: var(--bad); }
+.chip.idle i { background: var(--muted); }
+.btn {
+  height: 32px; padding: 0 14px; border-radius: 6px; border: 1px solid var(--line);
+  background: var(--raise); cursor: pointer; font-weight: 600; white-space: nowrap;
+}
+.btn:hover { border-color: var(--dim); }
+.btn.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
+.btn.primary:hover { filter: brightness(1.08); }
+.btn.small { height: 28px; padding: 0 10px; font-size: 13px; }
+.btn[disabled] { opacity: 0.45; cursor: default; }
+.only-narrow { display: none; }
+
+/* Display: spectrum, frequency scale, waterfall */
+.view {
+  grid-area: view; min-width: 0; min-height: 0; position: relative;
+  display: flex; flex-direction: column; border: 1px solid var(--line); border-radius: 8px;
+  overflow: hidden; background: var(--plot);
+}
+.spec-wrap { position: relative; flex: 0 0 auto; min-height: 120px; }
+.wf-wrap { position: relative; flex: 1 1 auto; min-height: 60px; }
+canvas { display: block; width: 100%; height: 100%; touch-action: none; }
+.divider {
+  flex: 0 0 9px; cursor: ns-resize; background: var(--panel); border-block: 1px solid var(--line);
+  display: grid; place-items: center; touch-action: none;
+}
+.divider { position: relative; }
+.divider::before { content: ""; position: absolute; left: 0; right: 0; top: -10px; bottom: -10px; }   /* bigger grab zone */
+@media (pointer: coarse) { .divider { flex-basis: 16px; } .divider::after { width: 54px; height: 4px; } }
+.divider::after { content: ""; width: 38px; height: 3px; border-radius: 2px; background: var(--dim); }
+.overlay-note {
+  position: absolute; left: 50%; top: 12px; transform: translateX(-50%);
+  font: 600 11px var(--font-label); letter-spacing: 0.14em; text-transform: uppercase;
+  color: var(--accent); background: rgba(10, 14, 17, 0.75); padding: 3px 10px; border-radius: 10px;
+  pointer-events: none;
+}
+.hover-read {
+  position: absolute; pointer-events: none; font: 12px var(--font-num); color: var(--fg);
+  background: rgba(10, 14, 17, 0.85); border: 1px solid var(--line); padding: 2px 6px; border-radius: 4px;
+  white-space: nowrap;
+}
+
+/* Control rack */
+.rack {
+  grid-area: rack; min-height: 0; min-width: 0; overflow-y: auto; overflow-x: hidden; display: flex; flex-direction: column; gap: 10px;
+  scrollbar-width: thin; transition: opacity 0.2s ease;
+}
+.sect { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px 12px; display: flex; flex-direction: column; gap: 9px; }
+.sect h2 {
+  margin: 0; font: 600 11px var(--font-label); letter-spacing: 0.14em; text-transform: uppercase; color: var(--muted);
+  display: flex; justify-content: space-between; align-items: center;
+}
+.row { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.row > label, .lbl { flex: 0 0 74px; color: var(--muted); font-size: 13px; }
+.row .grow { flex: 1 1 auto; min-width: 0; }
+.val.wide { min-width: 86px; }
+.val { white-space: nowrap; font: 12px var(--font-num); color: var(--fg); min-width: 54px; text-align: right; font-variant-numeric: tabular-nums; }
+.seg { display: flex; flex: 1 1 auto; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; }
+.seg button {
+  flex: 1 1 0; height: 28px; border: 0; background: transparent; cursor: pointer; font-size: 13px;
+  font-variant-numeric: tabular-nums; color: var(--muted); padding: 0 4px;
+}
+.seg button + button { border-left: 1px solid var(--line); }
+.seg button.on { background: var(--raise); color: var(--fg); box-shadow: inset 0 -2px 0 var(--accent); }
+.seg button[disabled] { opacity: 0.35; cursor: default; }
+input[type=range] { width: 100%; accent-color: var(--accent); }
+input[type=number], select {
+  height: 28px; border-radius: 6px; border: 1px solid var(--line); background: var(--bg); padding: 0 8px; min-width: 0;
+}
+input[type=number] { font-family: var(--font-num); font-size: 13px; width: 100%; }
+.check { display: flex; align-items: center; gap: 8px; cursor: pointer; font-size: 13px; color: var(--fg); }
+.check input { accent-color: var(--accent); width: 16px; height: 16px; }
+.note { font-size: 12.5px; color: var(--muted); line-height: 1.45; margin: 0; }
+.note b { color: var(--fg); font-weight: 600; }
+.fw { font: 12px var(--font-num); color: var(--fg); overflow-wrap: anywhere; }
+.stats { display: grid; grid-template-columns: 1fr 1fr; gap: 4px 12px; font-size: 12.5px; }
+.stats div { display: flex; justify-content: space-between; color: var(--muted); }
+.stats b { font: 500 12px var(--font-num); color: var(--fg); }
+.stats b.bad { color: var(--bad); }
+details.log summary { cursor: pointer; font: 600 11px var(--font-label); letter-spacing: 0.14em; text-transform: uppercase; color: var(--muted); }
+.logbox {
+  margin-top: 8px; max-height: 180px; overflow: auto; font: 11px/1.45 var(--font-num); color: var(--muted);
+  white-space: pre-wrap; overflow-wrap: anywhere; background: var(--bg); border-radius: 6px; padding: 6px 8px;
+}
+.marker-read { font: 12px var(--font-num); color: var(--accent); min-height: 1.4em; }
+
+.fwbox { display: flex; flex-direction: column; gap: 8px; border-top: 1px solid var(--line); padding-top: 10px; }
+.btn.block { width: 100%; }
+.btn.warn { background: #c0761a; border-color: #c0761a; color: #fff7ea; }
+.btn.armed { background: var(--bad); border-color: var(--bad); color: #fff; }
+.bar { height: 6px; border-radius: 3px; background: var(--bg); overflow: hidden; border: 1px solid var(--line); }
+.bar i { display: block; height: 100%; width: 0; background: var(--accent); transition: width 0.15s linear; }
+.stage { font-size: 13px; color: var(--fg); }
+.result.ok { color: var(--ok); } .result.bad { color: var(--bad); }
+.linklike { background: none; border: 0; padding: 0; color: var(--muted); text-decoration: underline; cursor: pointer; font-size: 12.5px; align-self: flex-start; }
+.linklike:hover { color: var(--fg); }
+
+.iconbtn { width: 36px; padding: 0; display: inline-grid; place-items: center; }
+.iconbtn svg { width: 15px; height: 15px; fill: currentColor; }
+.toast {
+  position: absolute; left: 50%; bottom: 14px; transform: translateX(-50%); z-index: 6; max-width: calc(100% - 32px);
+  background: var(--raise); color: var(--fg); border: 1px solid var(--line); border-left: 3px solid var(--accent);
+  padding: 8px 12px; border-radius: 6px; font-size: 13px; box-shadow: 0 6px 20px rgba(0, 0, 0, 0.45);
+}
+.toast.bad { border-left-color: var(--bad); }
+.card {
+  position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); z-index: 7; width: min(420px, calc(100% - 32px));
+  background: var(--panel); border: 1px solid var(--warn); border-radius: 10px; padding: 16px 18px; display: flex; flex-direction: column; gap: 10px;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.55);
+}
+.card h3 { margin: 0; font: 600 15px var(--font-label); letter-spacing: 0.03em; color: var(--warn); }
+.card p { margin: 0; font-size: 13.5px; color: var(--fg); line-height: 1.5; }
+.card .row { justify-content: flex-end; }
+.scrim { display: none; }
+input[type=number].short { width: 64px; flex: 0 0 64px; }
+.logstate { font: 12px var(--font-num); color: var(--accent); }
+
+@media (max-width: 860px) {
+  .app, .app.rack-away { grid-template-columns: 1fr; grid-template-areas: "head" "view"; padding: 8px 16px 10px; gap: 8px; }
+  .app.rack-away .rack { opacity: 1; pointer-events: auto; }
+  .racktab { display: none; }
+  .readout { order: 3; flex: 1 1 100%; justify-content: center; margin: 0; }
+  .digits { font-size: 26px; }
+  .conn { margin-left: auto; }
+  .only-narrow { display: inline-flex; align-items: center; }
+  .rack {
+    position: fixed; left: 0; right: 0; bottom: 0; z-index: 20; max-height: 62%;
+    background: var(--bg); border-top: 1px solid var(--line); border-radius: 14px 14px 0 0;
+    padding: 12px 16px calc(14px + env(safe-area-inset-bottom, 0px));
+    transform: translateY(105%); transition: transform 0.22s ease; box-shadow: 0 -12px 30px rgba(0, 0, 0, 0.45);
+  }
+  .rack.open { transform: translateY(0); }
+  .scrim { display: block; position: fixed; inset: 0; z-index: 19; background: rgba(0, 0, 0, 0.45); }
+  .scrim[hidden] { display: none; }
+  .rack-grip { display: block; width: 44px; height: 4px; border-radius: 2px; background: var(--dim); margin: 0 auto 4px; flex: 0 0 auto; }
+}
+@media (min-width: 861px) { .rack-grip { display: none; } }
+@media (max-width: 520px) {
+  .brand span, .wide-only, #chipText { display: none; }
+  .chip { padding: 0 9px; }
+  .conn .btn { padding: 0 10px; }
+}
+@media (prefers-reduced-motion: reduce) { .rack, .app { transition: none; } }
+</style>
+</head>
+<body>
+<div class="app" id="app">
+  <header class="top">
+    <div class="brand"><b>Z2 Web SDR</b><span>ESP32-S3</span></div>
+    <div class="readout" title="Scroll or tap the upper/lower half of a digit to tune">
+      <div class="digits" id="digits" role="group" aria-label="Centre frequency"></div>
+      <span class="unit">MHz</span>
+    </div>
+    <div class="conn">
+      <span class="chip demo" id="chip"><i></i><span id="chipText">Demo</span></span>
+      <button class="btn iconbtn" id="playBtn" type="button" aria-label="Stop" title="Stop / start the spectrum"><svg viewBox="0 0 16 16" id="playIcon"><rect x="3" y="3" width="10" height="10" rx="1.5"/></svg></button>
+      <button class="btn primary" id="connectBtn" type="button"><span id="connectLabel">Connect</span><span class="wide-only"> board</span></button>
+      <button class="btn only-narrow" id="rackBtn" type="button" aria-expanded="false" aria-controls="rack">Controls</button>
+    </div>
+  </header>
+
+  <main class="view" id="view">
+    <div class="spec-wrap" id="specWrap"><canvas id="spec" aria-label="Spectrum"></canvas>
+      <div class="overlay-note" id="demoNote">Demo data<span class="wide-only"> · connect a board for live spectrum</span></div>
+      <div class="hover-read" id="hoverRead" hidden></div>
+    </div>
+    <div class="divider" id="divider" role="separator" aria-label="Resize spectrum and waterfall" tabindex="0"></div>
+    <div class="wf-wrap" id="wfWrap"><canvas id="wf" aria-label="Waterfall"></canvas></div>
+    <button class="racktab" id="rackTab" type="button" hidden aria-controls="rack" title="Show the settings (S)"><svg viewBox="0 0 16 16"><path d="M2 3h8v2H2zm10 0h2v2h-2zM2 7h2v2H2zm4 0h8v2H6zM2 11h6v2H2zm8 0h4v2h-4z"/></svg>Settings</button>
+    <div class="toast" id="toast" role="status" hidden></div>
+    <div class="card" id="portCard" role="alertdialog" aria-labelledby="portCardTitle" hidden>
+      <h3 id="portCardTitle">This is the board's UART port</h3>
+      <p id="portCardText">The selected port belongs to a USB-UART bridge (CH343, CP210x, FTDI). The spectrum needs the ESP32-S3's own USB port: on a DevKit it is the connector marked USB, next to the one marked UART. Move the cable, then connect again.</p>
+      <div class="row"><button class="btn small" id="portCardOk" type="button">OK</button></div>
+    </div>
+  </main>
+  <div class="scrim" id="scrim" hidden></div>
+
+  <aside class="rack" id="rack">
+    <span class="rack-grip"></span>
+    <div class="rackbar"><span>Settings</span>
+      <button class="pin" id="pinBtn" type="button" aria-pressed="false" title="Keep the settings open"><svg viewBox="0 0 16 16"><path d="M10.5 1.5l4 4-1.4 1.4-.7-.7-2.6 2.6.4 3.1-1.4 1.4-2.5-2.5-3.6 3.6-1-1 3.6-3.6-2.5-2.5 1.4-1.4 3.1.4 2.6-2.6-.7-.7z"/></svg></button>
+    </div>
+
+    <section class="sect">
+      <h2>Source</h2>
+      <p class="note" id="srcNote">Plug the ESP32-S3 into its native USB port (the one marked USB, not UART), then press <b>Connect board</b>.</p>
+      <div class="fw" id="fwInfo">No board connected</div>
+      <div class="fw" id="tuneInfo"></div>
+      <div class="row">
+        <button class="btn small" id="demoBtn" type="button">Run demo</button>
+        <button class="btn small" id="allPortsBtn" type="button" title="Pick any serial port, also USB-UART bridges">Other port…</button>
+      </div>
+      <label class="check"><input type="checkbox" id="autoConnect"> Start when a board is plugged in</label>
+      <div class="fwbox" id="fwBox">
+        <button class="btn block" id="flashBtn" type="button">Reinstall firmware</button>
+        <p class="note" id="fwNeed" hidden>This board needs the ESP-SDR firmware that comes with this page.</p>
+        <div id="flashProg" hidden>
+          <div class="stage" id="flashStage">Starting</div>
+          <div class="bar"><i id="flashBar"></i></div>
+          <p class="note">Keep the board connected. Takes about 15 seconds.</p>
+        </div>
+        <p class="note result" id="flashResult" hidden></p>
+        <p class="note" id="fwBundleInfo"></p>
+        <button class="linklike" id="fwPickBtn" type="button">Flash another build from disk…</button>
+        <input type="file" id="fwPick" multiple webkitdirectory hidden>
+      </div>
+    </section>
+
+    <section class="sect">
+      <h2>Tuning</h2>
+      <div class="row"><label for="freqIn">Centre</label><input class="grow" id="freqIn" type="number" step="0.001" min="2204" max="2804" inputmode="decimal"><span class="val">MHz</span></div>
+      <div class="row"><span class="lbl">Step</span>
+        <div class="seg" id="stepSeg">
+          <button type="button" data-v="100000">0.1</button><button type="button" data-v="1000000">1</button><button type="button" data-v="5000000">5</button><button type="button" data-v="20000000">20</button>
+        </div><span class="val">MHz</span></div>
+      <div class="row"><label for="ppmIn">Crystal</label><input class="grow" id="ppmIn" type="number" step="0.1" min="-50" max="50"><span class="val">ppm</span></div>
+    </section>
+
+    <section class="sect">
+      <h2>Spectrum <span id="profileTag"></span></h2>
+      <div class="row"><span class="lbl">Span</span>
+        <div class="seg" id="spanSeg"><button type="button" data-v="16000000">16</button><button type="button" data-v="40000000">40</button><button type="button" data-v="80000000">80</button></div><span class="val">MHz</span></div>
+      <div class="row"><span class="lbl">FFT</span><div class="seg" id="binsSeg"></div></div>
+      <div class="row"><label for="gainIn">Gain</label><input class="grow" id="gainIn" type="range" min="0" max="82" step="1"><span class="val wide" id="gainVal"></span></div>
+      <div class="row"><span class="lbl">Detector</span>
+        <div class="seg" id="detSeg"><button type="button" data-v="0">Mean</button><button type="button" data-v="1">Max</button></div></div>
+      <label class="check"><input type="checkbox" id="dcFix"> Remove DC per FFT on the chip</label>
+    </section>
+
+    <section class="sect">
+      <h2>Display</h2>
+      <div class="row"><span class="lbl">Zoom</span>
+        <div class="seg" id="zoomSeg"><button type="button" data-v="1">1×</button><button type="button" data-v="2">2×</button><button type="button" data-v="4">4×</button><button type="button" data-v="8">8×</button></div></div>
+      <label class="check"><input type="checkbox" id="autoRange"> Auto range</label>
+      <div class="row"><label for="dbMax">Top</label><input class="grow" id="dbMax" type="range" min="-100" max="0" step="1"><span class="val" id="dbMaxVal"></span></div>
+      <div class="row"><label for="dbMin">Bottom</label><input class="grow" id="dbMin" type="range" min="-150" max="-40" step="1"><span class="val" id="dbMinVal"></span></div>
+      <div class="row"><label for="avgIn">Averaging</label><input class="grow" id="avgIn" type="range" min="0" max="0.97" step="0.01"><span class="val" id="avgVal"></span></div>
+      <div class="row"><label for="wfRate">Waterfall</label><input class="grow" id="wfRate" type="range" min="10" max="310" step="10"><span class="val" id="wfRateVal"></span></div>
+      <div class="row"><label for="palette">Colours</label>
+        <select class="grow" id="palette"><option value="classic">Classic</option><option value="ember">Ember</option><option value="ice">Ice</option><option value="mono">Mono</option></select></div>
+      <div class="row">
+        <label class="check grow"><input type="checkbox" id="peakHold"> Peak hold</label>
+        <button class="btn small" id="peakClear" type="button">Clear</button>
+      </div>
+      <div class="row">
+        <button class="btn small" id="peakFind" type="button">Marker to peak</button>
+        <button class="btn small" id="markerOff" type="button">Remove marker</button>
+      </div>
+      <div class="marker-read" id="markerRead"></div>
+      <label class="check"><input type="checkbox" id="keepAwake"> Keep the screen on</label>
+    </section>
+
+    <section class="sect" id="exportSect">
+      <h2>Spectrum export</h2>
+      <div class="row"><span class="lbl">Capture</span>
+        <div class="seg" id="expModeSeg"><button type="button" data-v="snap">Snapshot</button><button type="button" data-v="avg">Average</button><button type="button" data-v="max">Max</button></div></div>
+      <div class="row"><label for="expN">Spectra</label><input class="grow" id="expN" type="number" min="1" max="100000" step="1"><span class="val">FFT frames</span></div>
+      <div class="row"><span class="lbl">Span</span>
+        <div class="seg" id="expSpanSeg"><button type="button" data-v="full">Full</button><button type="button" data-v="view">Visible</button></div></div>
+      <div class="row"><button class="btn small" id="csvBtn" type="button">Save CSV</button><span class="note" id="expState"></span></div>
+      <div class="row"><label for="logIv">Log every</label><input class="short" id="logIv" type="number" min="0.1" max="3600" step="0.1"><span class="note">s</span>
+        <button class="btn small" id="logBtn" type="button">Start log</button></div>
+      <div class="logstate" id="logState"></div>
+    </section>
+
+    <section class="sect">
+      <h2>Link</h2>
+      <div class="stats">
+        <div>Spectra/s <b id="stFps">0</b></div>
+        <div>Data <b id="stRate">0 kB/s</b></div>
+        <div>Frames <b id="stFrames">0</b></div>
+        <div>Lost <b id="stLost">0</b></div>
+        <div>CRC errors <b id="stCrc">0</b></div>
+        <div>Restarts <b id="stRestarts">0</b></div>
+      </div>
+      <details class="log"><summary>Command log</summary><div class="logbox" id="logbox"></div></details>
+      <button class="btn small" id="debugBtn" type="button">Export debug log</button>
+    </section>
+    <p class="note">Drag the spectrum or waterfall to tune, scroll to step, Ctrl + scroll or pinch to zoom, tap to place a marker. The settings hide after a few seconds without use: bring them back from the tab on the right edge or with S, or pin them open.</p>
+  </aside>
+</div>
+
+<script type="application/json" id="fwBundle"></script>
+<script>
+"use strict";
+// ---------------------------------------------------------------- constants (match the SDR++ ESP-SDR module)
+const FMIN = 2204e6, FMAX = 2804e6;
+const SPEC_FALLBACK = [[16e6,6,256,2,1],[16e6,6,1024,2,4],[16e6,6,2048,3,7],[40e6,1,256,5,3],[40e6,1,1024,5,9],
+                       [40e6,1,2048,7,17],[80e6,0,256,10,5],[80e6,0,1024,14,16],[80e6,0,2048,14,30]];
+const GAIN_IDX = [0, 10, 20, 40, 50, 60, 70, 82], GAIN_DB = [0, 10.3, 21.1, 30.2, 41.9, 51.3, 61.3, 73.3];
+function gainDb(g) {
+  for (let i = 0; i < 7; i++) if (g <= GAIN_IDX[i + 1]) return GAIN_DB[i] + (GAIN_DB[i + 1] - GAIN_DB[i]) * (g - GAIN_IDX[i]) / (GAIN_IDX[i + 1] - GAIN_IDX[i]);
+  return GAIN_DB[7];
+}
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const $ = (id) => document.getElementById(id);
+
+// ---------------------------------------------------------------- CRC32 (zlib) and SPC1 frame parser
+const CRC_T = (() => { const t = new Uint32Array(256); for (let i = 0; i < 256; i++) { let c = i; for (let k = 0; k < 8; k++) c = c & 1 ? 0xEDB88320 ^ (c >>> 1) : c >>> 1; t[i] = c >>> 0; } return t; })();
+function crc32(b, off, n) { let c = 0xFFFFFFFF; for (let i = off, e = off + n; i < e; i++) c = CRC_T[(c ^ b[i]) & 0xFF] ^ (c >>> 8); return (c ^ 0xFFFFFFFF) >>> 0; }
+
+// Growable byte buffer fed by the serial reader
+class ByteBuf {
+  constructor() { this.b = new Uint8Array(1 << 18); this.n = 0; }
+  push(chunk) {
+    if (this.n + chunk.length > this.b.length) {
+      let sz = this.b.length; while (sz < this.n + chunk.length) sz *= 2;
+      const nb = new Uint8Array(sz); nb.set(this.b.subarray(0, this.n)); this.b = nb;
+    }
+    this.b.set(chunk, this.n); this.n += chunk.length;
+  }
+  drop(k) { if (k <= 0) return; if (k >= this.n) { this.n = 0; return; } this.b.copyWithin(0, k, this.n); this.n -= k; }
+  clear() { this.n = 0; }
+}
+
+// SPC1: magic, u32 frame, u64 pair index, u32 pairs, u16 ffts, u8 flags, u8 gain, u16 drops,
+// u8 log2(n), u8 dB step, n codes (dB*step of |X|^2 in natural FFT order), u32 CRC.
+// Returns {consumed, frames:[{frame, n, db: Float32Array}], crcErrors}. Same mapping as the module:
+// fftshift + mirror (S3: RF above LO is negative), code/step - 84.3 dB to dBFS.
+function parseSpc1(buf, len, dcFix) {
+  const out = { consumed: 0, frames: [], crcErrors: 0 };
+  let pos = 0;
+  for (;;) {
+    let i = -1;
+    for (let k = pos; k + 3 < len; k++) if (buf[k] === 0x53 && buf[k + 1] === 0x50 && buf[k + 2] === 0x43 && buf[k + 3] === 0x31) { i = k; break; }
+    if (i < 0) { pos = len > 3 ? len - 3 : 0; break; }
+    if (len < i + 28) { pos = i; break; }
+    const log2n = buf[i + 26];
+    if (log2n < 6 || log2n > 12) { pos = i + 4; continue; }
+    const n = 1 << log2n, L = 28 + n + 4;
+    if (len < i + L) { pos = i; break; }
+    const crc = (buf[i + L - 4] | (buf[i + L - 3] << 8) | (buf[i + L - 2] << 16) | (buf[i + L - 1] << 24)) >>> 0;
+    pos = i + L;
+    if (crc32(buf, i, L - 4) !== crc) { out.crcErrors++; continue; }
+    const frame = (buf[i + 4] | (buf[i + 5] << 8) | (buf[i + 6] << 16) | (buf[i + 7] << 24)) >>> 0;
+    const step = buf[i + 27] || 2, c0 = i + 28, db = new Float32Array(n);
+    for (let j = 0; j < n; j++) { const v = buf[c0 + ((n / 2 - j + n) % n)]; db[j] = v ? v / step - 84.3 : -140; }
+    if (dcFix) {   // the chip empties the DC bin of every FFT: fill it from its neighbours
+      const a = Math.pow(10, db[n / 2 - 1] / 10), b = Math.pow(10, db[n / 2 + 1] / 10);
+      db[n / 2] = 10 * Math.log10(0.5 * (a + b));
+    }
+    out.frames.push({ frame, n, gain: buf[i + 21], db });
+  }
+  out.consumed = pos;
+  return out;
+}
+
+// SPECINFO? reply: profiles [rate_hz, code, bins, stride, units_per_frame]
+function parseProfiles(info) {
+  const res = [], re = /\[([-\d\s,]+)\]/g; let m;
+  while ((m = re.exec(info || ""))) {
+    const v = m[1].split(/[\s,]+/).filter(Boolean).map(Number);
+    if (v.length >= 5) res.push(v.slice(0, 5));
+  }
+  return res;
+}
+
+// ---------------------------------------------------------------- Web Serial source
+class SerialSource {
+  constructor(hooks) {
+    this.h = hooks;                // onSpectrum(db, n, fs, centerHz), onStatus(kind, text), log(line), onInfo()
+    this.port = null; this.reader = null; this.writer = null;
+    this.buf = new ByteBuf(); this.tail = "";
+    this.open = false; this.streaming = false; this.busy = false;
+    this.want = null; this.cur = null; this.dirty = false; this.lastApply = 0;
+    this.profiles = []; this.caps = ""; this.fwInfo = "";
+    this.stats = { frames: 0, lost: 0, crc: 0, bytes: 0, restarts: 0 };
+    this.nextFrame = -1; this.endBurst = []; this.waiters = [];
+    this.dec = new TextDecoder("latin1"); this.enc = new TextEncoder();
+  }
+  static supported() { return "serial" in navigator; }
+
+  async connect(anyPort, existingPort) {
+    const opts = anyPort ? {} : { filters: [{ usbVendorId: 0x303a }] };
+    this.port = existingPort || await navigator.serial.requestPort(opts);
+    const info = this.port.getInfo();
+    if (info.usbVendorId && info.usbVendorId !== 0x303a) this.h.log("note: this is not the S3's native USB port (VID " + info.usbVendorId.toString(16) + "); the USB-UART bridge is too slow for SPEC");
+    await this.port.open({ baudRate: 2000000, bufferSize: 1 << 20 });
+    try { await this.port.setSignals({ dataTerminalReady: true, requestToSend: true }); } catch (e) {}
+    this.open = true;
+    this.writer = this.port.writable.getWriter();
+    this.readDone = this.readLoop();
+    await sleep(300);
+    this.buf.clear();
+    // An earlier session may still be streaming: stop it and wait for the line to go quiet
+    let caps = null;
+    for (let attempt = 0; attempt < 3 && !caps && this.open; attempt++) {
+      await this.write("\n");
+      let quietSince = performance.now(); const giveUp = quietSince + 3000;
+      while (performance.now() < giveUp) {
+        const before = this.stats.bytes;
+        await this.waitData(60);
+        if (this.stats.bytes !== before) quietSince = performance.now();
+        else if (performance.now() - quietSince > 250) break;
+      }
+      this.buf.clear();
+      caps = await this.command("CAPS", "CAPS", 1500);
+    }
+    if (!caps) { const port = this.port; await this.close(); const e = new Error("No ESP-SDR firmware answered on this port."); e.port = port; e.needsFirmware = true; throw e; }
+    this.caps = caps + " ";
+    if (!/ SPEC[ \n]/.test(this.caps + "\n")) { const port = this.port; await this.close(); const e = new Error("This firmware has no SPEC (spectrum) mode. Install the firmware below."); e.port = port; e.needsFirmware = true; throw e; }
+    let fw = "old firmware (no version info)";
+    if (this.caps.includes(" VERSION ")) {
+      const v = await this.command("VERSION?", "VERSION", 1500);
+      if (v) {
+        const f = (k) => { const m = new RegExp('"' + k + '":"([^"]*)"').exec(v); return m ? m[1] : ""; };
+        const rev = f("revision");
+        fw = (f("build_date") || "?") + " " + rev.slice(0, 7) + (rev.includes("-dirty") ? "+" : "");
+        this.fwBuild = f("build_timestamp");
+      }
+    }
+    this.fwInfo = fw;
+    const si = await this.command("SPECINFO?", "SPECINFO", 1500);
+    this.profiles = parseProfiles(si);
+    if (!this.profiles.length) this.profiles = SPEC_FALLBACK;
+    this.h.onInfo(this);
+    this.loop();
+  }
+
+  async readLoop() {
+    while (this.open && this.port.readable) {
+      this.reader = this.port.readable.getReader();
+      try {
+        for (;;) {
+          const { value, done } = await this.reader.read();
+          if (done) break;
+          if (value && value.length) this.onBytes(value);
+        }
+      } catch (e) {
+        if (this.open) { this.h.log("read error: " + e.message); }
+      } finally { try { this.reader.releaseLock(); } catch (e) {} }
+      if (!this.open) break;
+      await sleep(50);
+      if (!this.port.readable) break;
+    }
+    if (this.open) { this.open = false; this.h.onStatus("err", "Board disconnected"); }
+  }
+
+  onBytes(v) {
+    this.stats.bytes += v.length;
+    this.buf.push(v);
+    if (this.streaming) {
+      this.tail = (this.tail + this.dec.decode(v)).slice(-600);
+      const p = this.tail.lastIndexOf("SPECEND ");
+      if (p >= 0 && this.tail.indexOf("\n", p) > p) {
+        const line = this.tail.slice(p, this.tail.indexOf("\n", p)).trim();
+        this.tail = "";
+        const nums = line.slice(8).trim().split(/\s+/).filter((x) => /^\d+$/.test(x));
+        if (nums.length >= 2) { this.runEnded(line); this.wake(); return; }
+      }
+      const r = parseSpc1(this.buf.b, this.buf.n, this.cur.dcFix);
+      this.buf.drop(r.consumed);
+      this.stats.crc += r.crcErrors;
+      for (const f of r.frames) {
+        if (f.n !== this.cur.bins) continue;
+        if (this.nextFrame >= 0 && f.frame !== this.nextFrame) this.stats.lost += (f.frame - this.nextFrame) >>> 0;
+        this.nextFrame = (f.frame + 1) >>> 0;
+        this.stats.frames++;
+        this.h.onSpectrum(f.db, f.n, this.cur.span, this.cur.freqHz);
+      }
+    }
+    this.wake();
+  }
+  wake() { const w = this.waiters; this.waiters = []; for (const r of w) r(); }
+  waitData(ms) { return new Promise((res) => { const t = setTimeout(res, ms); this.waiters.push(() => { clearTimeout(t); res(); }); }); }
+  async write(s) { if (this.writer) await this.writer.write(this.enc.encode(s)); }
+
+  // Send a command, return the first reply line that starts with `expect` (or null on ERR / timeout)
+  async command(c, expect, timeoutMs) {
+    this.buf.clear();
+    this.h.log("> " + c);
+    await this.write(c + "\n");
+    const end = performance.now() + timeoutMs; let scan = 0, start = 0;
+    while (performance.now() < end && this.open) {
+      const b = this.buf.b, n = this.buf.n;
+      for (; scan < n; scan++) {
+        if (b[scan] === 10) {
+          const line = this.dec.decode(b.subarray(start, scan)).replace(/\r$/, "");
+          start = scan + 1;
+          if (line.startsWith(expect) || line.startsWith("ERR")) {
+            this.h.log("< " + (line.length > 160 ? line.slice(0, 160) + "…" : line));
+            this.buf.clear();
+            return line.startsWith("ERR") ? null : line;
+          }
+        }
+      }
+      await this.waitData(40);
+    }
+    this.h.log("< (no reply)");
+    return null;
+  }
+
+  update(s) { this.want = { ...s }; this.dirty = true; }
+  async pause() { this.paused = true; while (this.busy) await sleep(20); if (this.streaming) { this.busy = true; await this.stopStream(); this.busy = false; } this.h.onStatus("idle", "Stopped"); }
+  resume() { this.paused = false; this.dirty = true; }
+
+  async loop() {
+    while (this.open) {
+      const now = performance.now();
+      if (this.dirty && !this.paused && !this.busy && (!this.streaming || now - this.lastApply >= 350)) {
+        this.busy = true; this.dirty = false;
+        const s = this.want;
+        try {
+          if (this.streaming) await this.stopStream();
+          await this.startStream(s);
+        } catch (e) { this.h.log("error: " + e.message); }
+        this.lastApply = performance.now(); this.busy = false;
+      }
+      if (this.restartPending && !this.busy && !this.paused) {
+        this.restartPending = false; this.busy = true;
+        await sleep(20); this.buf.clear();
+        try { await this.startStream(this.cur); } catch (e) {}
+        this.busy = false;
+      }
+      await sleep(25);
+    }
+  }
+
+  runEnded(line) {
+    // The firmware ended the run on its own (ring overrun): restart unless it keeps happening
+    this.h.log("firmware ended the stream: " + line);
+    this.streaming = false; this.stats.restarts++;
+    const t = performance.now();
+    this.endBurst = this.endBurst.filter((x) => t - x < 5000); this.endBurst.push(t);
+    if (this.endBurst.length > 5) { this.h.log("the stream keeps ending, giving up"); this.h.onStatus("err", "Stream keeps ending"); return; }
+    this.restartPending = true;
+  }
+
+  profile(rate, bins) {
+    const p = this.profiles.find((v) => v[0] === rate && v[2] === bins) || SPEC_FALLBACK.find((v) => v[0] === rate && v[2] === bins);
+    return p ? { code: p[1], stride: p[3], upf: p[4] } : { code: 6, stride: 2, upf: 1 };
+  }
+  binsFor(rate) { const b = this.profiles.filter((v) => v[0] === rate).map((v) => v[2]); return b.length ? b : [256, 1024, 2048]; }
+
+  async startStream(s) {
+    let fk = Math.round(s.freqHz * (1 - s.ppm * 1e-6) / 1e3);
+    fk = Math.max(FMIN / 1e3, Math.min(FMAX / 1e3, fk));
+    const p = this.profile(s.span, s.bins);
+    const unitUs = Math.floor(12288 * 1e6 / s.span);
+    const upf = Math.max(p.upf, Math.min(1000, Math.floor(20000 / Math.max(1, unitUs))));
+    await this.command("FREQ " + Math.floor(fk / 1000), "OK", 1500);
+    await this.command("FOFS " + (fk % 1000), "OK", 1500);
+    await this.command("GAIN MANUAL " + s.gain, "OK", 1500);
+    await this.command("BANDWIDTH " + (s.span > 16e6 ? "0" : "20"), "OK", 1500);
+    await this.command(s.dcFix ? "DC 0" : "DC 1", "", 800);
+    const cmd = "SPEC 0 " + p.stride + " " + upf + " " + (s.maxHold ? 1 : 0) + " " + p.code + " " + s.bins;
+    this.buf.clear(); this.tail = ""; this.nextFrame = -1;
+    this.cur = { ...s, freqHz: fk * 1e3 / (1 - s.ppm * 1e-6) };
+    this.h.log("> " + cmd);
+    await this.write(cmd + "\n");
+    this.streaming = true;
+    this.h.onStatus("live", "Live");
+    $("tuneInfo").textContent = "Spectrum " + s.span / 1e6 + " MHz, " + s.bins + " bins, " + (s.maxHold ? "max hold" : "mean") +
+      " · LO " + Math.floor(fk / 1000) + " MHz + " + (fk % 1000) + " kHz";
+  }
+
+  async stopStream() {
+    // Any host byte ends a run; the firmware answers with a SPECEND line
+    this.streaming = false;
+    this.buf.clear();
+    await this.write("\n");
+    const end = performance.now() + 2000;
+    while (performance.now() < end && this.open) {
+      await this.waitData(50);
+      const n = this.buf.n;
+      const s = this.dec.decode(this.buf.b.subarray(Math.max(0, n - 4096), n));
+      const p = s.lastIndexOf("SPECEND");
+      if (p >= 0 && s.indexOf("\n", p) > p) break;
+      if (n > 65536) this.buf.drop(n - 8192);
+    }
+    await sleep(50);
+    this.buf.clear();
+  }
+
+  async close() {
+    if (!this.port) return;
+    try {
+      if (this.open) {
+        if (this.streaming) await this.stopStream();
+        await this.command("BANDWIDTH 20", "OK", 800);   // firmware defaults for other clients
+        await this.command("DC 1", "", 800);
+      }
+    } catch (e) {}
+    this.open = false;
+    try { if (this.reader) await this.reader.cancel(); } catch (e) {}
+    try { await this.readDone; } catch (e) {}
+    try { this.writer.releaseLock(); } catch (e) {}
+    try { await this.port.close(); } catch (e) {}
+    this.lastPort = this.port; this.port = null;
+  }
+}
+
+// ---------------------------------------------------------------- demo source: a plausible 2.2-2.8 GHz scene
+class DemoSource {
+  constructor(hooks) {
+    this.h = hooks; this.s = null; this.timer = null; this.t = 0;
+    this.stats = { frames: 0, lost: 0, crc: 0, bytes: 0, restarts: 0 };
+    this.wifi = [{ f: 2412e6, p: -36, duty: 0.3 }, { f: 2437e6, p: -34, duty: 0.5 }, { f: 2462e6, p: -41, duty: 0.25 }, { f: 2472e6, p: -49, duty: 0.15 }];
+    this.profiles = SPEC_FALLBACK; this.fwInfo = "Demo source (no hardware)";
+  }
+  binsFor(rate) { return this.profiles.filter((v) => v[0] === rate).map((v) => v[2]); }
+  update(s) { this.s = { ...s }; }
+  start(s) {
+    this.update(s);
+    $("tuneInfo").textContent = "Simulated Wi-Fi, BLE, LTE band 7, 13 cm beacon";
+    this.timer = setInterval(() => this.frame(), 22);
+  }
+  stop() { clearInterval(this.timer); this.timer = null; }
+  pause() { this.stop(); }
+  resume() { if (!this.timer) this.timer = setInterval(() => this.frame(), 22); }
+  frame() {
+    const s = this.s; if (!s) return;
+    this.t += 0.022;
+    const n = s.bins, fs = s.span, c = s.freqHz, g = gainDb(s.gain) - 51.3, out = new Float32Array(n);
+    const mx = s.maxHold, binW = fs / n;
+    const sig = new Float64Array(n);
+    const addShape = (fc, pDb, shapeFn) => {
+      const lo = Math.max(0, Math.floor((fc - 32e6 - (c - fs / 2)) / binW)), hi = Math.min(n, Math.ceil((fc + 32e6 - (c - fs / 2)) / binW));
+      for (let j = lo; j < hi; j++) { const f = c - fs / 2 + (j + 0.5) * binW; sig[j] += Math.pow(10, (pDb + shapeFn(Math.abs(f - fc))) / 10); }
+    };
+    const ofdm = (d) => d < 8.3e6 ? 0 : d < 11e6 ? -20 * (d - 8.3e6) / 2.7e6 : d < 20e6 ? -20 - 8 * (d - 11e6) / 9e6 : d < 30e6 ? -28 - 12 * (d - 20e6) / 10e6 : -60;
+    for (const w of this.wifi) {
+      w.duty = Math.min(0.9, Math.max(0.03, w.duty + (Math.random() - 0.5) * 0.08));
+      const on = mx ? (Math.random() < 0.2 + w.duty) : true;
+      if (on) addShape(w.f, w.p + (mx ? 4 : 10 * Math.log10(w.duty)) + g, ofdm);
+    }
+    const hops = 2 + Math.floor(Math.random() * 3);
+    for (let k = 0; k < hops; k++) {
+      const ch = Math.floor(Math.random() * 40);
+      addShape(2402e6 + ch * 2e6, (mx ? -44 : -54) + g, (d) => -12 * (d / 0.7e6) ** 2);
+    }
+    addShape(2630e6, -50 + g, (d) => d < 9e6 ? 0 : d < 10.5e6 ? -30 * (d - 9e6) / 1.5e6 : -60);   // LTE band 7 downlink
+    addShape(2320.05e6, -40 + g, (d) => -40 * (d / binW) ** 2);                                     // 13 cm narrowband beacon
+    const oven = Math.sin(this.t * 0.35) > 0.2;
+    if (oven) { const sweep = 2452e6 + 6e6 * (Math.random() * 2 - 1); addShape(sweep, (mx ? -24 : -32) + g, (d) => -10 * (d / 4e6) ** 2); }
+    for (let j = 0; j < n; j++) {
+      const f = c - fs / 2 + (j + 0.5) * binW, off = Math.abs(f - c);
+      const resp = 1 / (1 + Math.pow(off / 20e6, 12));
+      const lna = Math.pow(10, (-67 + g) / 10) * resp, adc = Math.pow(10, -76 / 10);
+      let p = lna + adc + sig[j] * resp;
+      let db = 10 * Math.log10(p);
+      const u1 = Math.random() || 1e-9, u2 = Math.random();
+      const gauss = Math.sqrt(-2 * Math.log(u1)) * Math.cos(6.283185 * u2);
+      db += mx ? 4.5 + 0.9 * gauss : 0.9 * gauss;
+      out[j] = Math.min(-4, db);
+    }
+    if (!s.dcFix) out[n / 2] = out[n / 2] + 14;
+    this.stats.frames++; this.stats.bytes += n + 32;
+    this.h.onSpectrum(out, n, fs, c);
+  }
+}
+
+// @@flasher-begin
+// @@flasher-end
+
+// ---------------------------------------------------------------- state + persistence
+const DEFAULTS = { freqHz: 2437e6, span: 80e6, bins: 2048, gain: 60, maxHold: false, dcFix: true, ppm: 0,
+  step: 1e6, zoom: 1, autoRange: true, dbMin: -85, dbMax: -20, avg: 0.3, wfRate: 310, palette: "classic", peakHold: false, split: 0.38,
+  autoConnect: true, keepAwake: true, playing: true, expMode: "snap", expN: 50, expSpan: "full", logIv: 1, rackPinned: false };
+const WF_ALL = 310;   // waterfall rate slider end stop: one row per spectrum, like the desktop app
+const state = { ...DEFAULTS };
+try { Object.assign(state, JSON.parse(localStorage.getItem("z2-web-sdr") || localStorage.getItem("sdrpp-esp-web") || "{}")); } catch (e) {}
+function save() { try { localStorage.setItem("z2-web-sdr", JSON.stringify(state)); } catch (e) {} }
+const srcSettings = () => ({ freqHz: state.freqHz, span: state.span, bins: state.bins, gain: state.gain, maxHold: state.maxHold, dcFix: state.dcFix, ppm: state.ppm });
+
+let source = null, mode = "demo";
+let marker = null;              // marker frequency (Hz) or null
+const logLines = [];
+function log(line) {
+  const t = new Date().toTimeString().slice(0, 8);
+  logLines.push(t + " " + line); if (logLines.length > 300) logLines.shift();
+  const box = $("logbox"); box.textContent = logLines.join("\n"); box.scrollTop = box.scrollHeight;
+}
+function setStatus(kind, text) { const c = $("chip"); c.className = "chip " + kind; $("chipText").textContent = text; }
+
+// ---------------------------------------------------------------- spectrum data (bin domain) + rendering
+const data = { db: null, avg: null, peak: null, n: 0, fs: 0, c: 0, fresh: false, rowAcc: null, rowCount: 0 };
+let frameTimes = [], lastRowAt = 0, rowQueue = [];
+function onSpectrum(db, n, fs, c) {
+  if (!state.playing) return;
+  const same = data.n === n && data.fs === fs && data.c === c;
+  if (!same) { data.avg = Float32Array.from(db); data.peak = Float32Array.from(db); data.rowAcc = new Float32Array(n).fill(-200); data.rowCount = 0; }
+  else {
+    // averaging is set per 20 ms so it feels the same at 50 or 270 spectra/s
+    const now = performance.now(), a = Math.pow(state.avg, Math.min(10, (now - (data.t || now)) / 20));
+    for (let j = 0; j < n; j++) {
+      data.avg[j] = a * data.avg[j] + (1 - a) * db[j];
+      if (db[j] > data.peak[j]) data.peak[j] = db[j];
+    }
+  }
+  // Waterfall: every spectrum is a row at the full rate (like the desktop app); at a lower rate a row
+  // is the max of the spectra since the last one, so short bursts stay visible
+  const now = performance.now();
+  if (state.wfRate >= WF_ALL) rowQueue.push({ db, n, fs, c });
+  else {
+    for (let j = 0; j < n; j++) if (db[j] > data.rowAcc[j]) data.rowAcc[j] = db[j];
+    data.rowCount++;
+    if (now - lastRowAt >= 1000 / state.wfRate) { rowQueue.push({ db: data.rowAcc.slice(), n, fs, c }); data.rowAcc.fill(-200); data.rowCount = 0; lastRowAt = now; }
+  }
+  if (rowQueue.length > 2000) rowQueue.splice(0, rowQueue.length - 2000);
+  data.db = db; data.n = n; data.fs = fs; data.c = c; data.fresh = true; data.t = now;
+  frameTimes.push(now);
+  exportTap(db, n, fs, c);
+}
+
+// ---------------------------------------------------------------- WebGL2 waterfall
+// Rows live in a ring texture in their own bin space (R16F, one texel per FFT bin) with a per-row
+// geometry texture (centre, span, bins). The shader maps every pixel to a frequency, so pan, zoom and
+// retune need no image copies, old rows stay at their true frequency, and the colour range applies to
+// the whole history. One texSubImage2D per spectrum: every spectrum can be a row.
+class WaterfallGL {
+  constructor(cv) {
+    const gl = cv.getContext("webgl2", { antialias: false, alpha: false, depth: false, stencil: false, preserveDrawingBuffer: false, powerPreference: "high-performance" });
+    if (!gl) throw new Error("no WebGL2");
+    // a software renderer is slower than the 2D canvas path
+    const dbg = gl.getExtension("WEBGL_debug_renderer_info");
+    const rnd = dbg ? String(gl.getParameter(dbg.UNMASKED_RENDERER_WEBGL)) : "";
+    if (/swiftshader|llvmpipe|software/i.test(rnd) && !window.__forceGL) throw new Error("software WebGL (" + rnd.slice(0, 40) + ")");
+    this.renderer = rnd;
+    this.gl = gl; this.TW = 4096; this.rows = 0; this.head = 0;
+    const vs = `#version 300 es
+      in vec2 p; void main() { gl_Position = vec4(p, 0.0, 1.0); }`;
+    const fs = `#version 300 es
+      precision highp float; precision highp int;
+      uniform highp sampler2D bins; uniform highp sampler2D meta; uniform sampler2D lut;
+      uniform float head, rows, va, vb, lo, hi, W, H;
+      out vec4 o;
+      const vec3 BG = vec3(0.016, 0.024, 0.039);
+      void main() {
+        float y = H - 1.0 - floor(gl_FragCoord.y);
+        if (y >= rows) { o = vec4(BG, 1.0); return; }
+        int r = int(mod(head - y + rows, rows));
+        vec4 m = texelFetch(meta, ivec2(0, r), 0);
+        if (m.w < 0.5) { o = vec4(BG, 1.0); return; }
+        float fa = va + (vb - va) * floor(gl_FragCoord.x) / W, fb = va + (vb - va) * (floor(gl_FragCoord.x) + 1.0) / W;
+        float bw = m.y / m.z, f0 = m.x - 0.5 * m.y;
+        float ia = (fa - f0) / bw - 0.5, ib = (fb - f0) / bw - 0.5;
+        if (ib < -0.5 || ia > m.z - 0.5) { o = vec4(BG, 1.0); return; }
+        float v;
+        int ja = int(max(0.0, ceil(ia))), jb = int(min(m.z - 1.0, floor(ib)));
+        if (jb >= ja) {                                  // several bins per pixel: keep the strongest
+          v = -200.0;
+          for (int k = 0; k < 32; k++) { int j = ja + k; if (j > jb) break; v = max(v, texelFetch(bins, ivec2(j, r), 0).r); }
+        } else {                                         // zoomed in: interpolate between bins
+          float im = 0.5 * (ia + ib); float j0 = clamp(floor(im), 0.0, m.z - 1.0); float j1 = min(m.z - 1.0, j0 + 1.0);
+          float t = clamp(im - j0, 0.0, 1.0);
+          v = mix(texelFetch(bins, ivec2(int(j0), r), 0).r, texelFetch(bins, ivec2(int(j1), r), 0).r, t);
+        }
+        float u = clamp((v - lo) / (hi - lo), 0.0, 1.0);
+        o = vec4(texture(lut, vec2(u * 255.0 / 256.0 + 0.5 / 256.0, 0.5)).rgb, 1.0);
+      }`;
+    const sh = (type, src) => { const x = gl.createShader(type); gl.shaderSource(x, src); gl.compileShader(x); if (!gl.getShaderParameter(x, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(x)); return x; };
+    const pr = gl.createProgram(); gl.attachShader(pr, sh(gl.VERTEX_SHADER, vs)); gl.attachShader(pr, sh(gl.FRAGMENT_SHADER, fs)); gl.linkProgram(pr);
+    if (!gl.getProgramParameter(pr, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(pr));
+    this.pr = pr; gl.useProgram(pr);
+    const buf = gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1]), gl.STATIC_DRAW);
+    const loc = gl.getAttribLocation(pr, "p"); gl.enableVertexAttribArray(loc); gl.vertexAttribPointer(loc, 2, gl.FLOAT, false, 0, 0);
+    this.u = {}; for (const n of ["bins", "meta", "lut", "head", "rows", "va", "vb", "lo", "hi", "W", "H"]) this.u[n] = gl.getUniformLocation(pr, n);
+    const mk = () => { const t = gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D, t); for (const [k, v] of [[gl.TEXTURE_MIN_FILTER, gl.NEAREST], [gl.TEXTURE_MAG_FILTER, gl.NEAREST], [gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE], [gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE]]) gl.texParameteri(gl.TEXTURE_2D, k, v); return t; };
+    this.tBins = mk(); this.tMeta = mk(); this.tLut = mk();
+    gl.bindTexture(gl.TEXTURE_2D, this.tLut); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    this.metaRow = new Float32Array(4);
+  }
+  alloc(rows) {
+    const gl = this.gl; rows = Math.max(16, Math.min(rows, gl.getParameter(gl.MAX_TEXTURE_SIZE)));
+    if (rows === this.rows) return;
+    this.rows = rows; this.head = 0;
+    gl.bindTexture(gl.TEXTURE_2D, this.tBins); gl.texImage2D(gl.TEXTURE_2D, 0, gl.R16F, this.TW, rows, 0, gl.RED, gl.FLOAT, null);
+    gl.bindTexture(gl.TEXTURE_2D, this.tMeta); gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA32F, 1, rows, 0, gl.RGBA, gl.FLOAT, new Float32Array(4 * rows));
+  }
+  setLut(u32) {
+    const gl = this.gl; gl.bindTexture(gl.TEXTURE_2D, this.tLut);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, 256, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, new Uint8Array(u32.buffer.slice(0)));
+  }
+  push(r) {
+    const gl = this.gl; if (!this.rows) return;
+    this.head = (this.head + 1) % this.rows;
+    const n = Math.min(r.n, this.TW);
+    gl.bindTexture(gl.TEXTURE_2D, this.tBins); gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, this.head, n, 1, gl.RED, gl.FLOAT, r.db, 0);
+    // frequencies relative to FMIN keep float32 precision (64 Hz at 600 MHz)
+    this.metaRow[0] = r.c - FMIN; this.metaRow[1] = r.fs; this.metaRow[2] = n; this.metaRow[3] = 1;
+    gl.bindTexture(gl.TEXTURE_2D, this.tMeta); gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, this.head, 1, 1, gl.RGBA, gl.FLOAT, this.metaRow);
+  }
+  draw(v, lo, hi, W, H) {
+    const gl = this.gl, u = this.u;
+    gl.viewport(0, 0, W, H); gl.useProgram(this.pr);
+    gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, this.tBins); gl.uniform1i(u.bins, 0);
+    gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, this.tMeta); gl.uniform1i(u.meta, 1);
+    gl.activeTexture(gl.TEXTURE2); gl.bindTexture(gl.TEXTURE_2D, this.tLut); gl.uniform1i(u.lut, 2);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.uniform1f(u.head, this.head); gl.uniform1f(u.rows, this.rows);
+    gl.uniform1f(u.va, v.a - FMIN); gl.uniform1f(u.vb, v.b - FMIN);
+    gl.uniform1f(u.lo, lo); gl.uniform1f(u.hi, hi); gl.uniform1f(u.W, W); gl.uniform1f(u.H, H);
+    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+  }
+}
+
+const specCv = $("spec"), sctx = specCv.getContext("2d");
+let wfCv = $("wf"), wgl = null, wctx = null;
+try { wgl = new WaterfallGL(wfCv); setTimeout(() => log("waterfall: WebGL2 (" + (wgl.renderer || "?") + ")"), 0); }
+catch (e) {
+  // a canvas that had a WebGL context cannot give a 2D one: swap in a fresh canvas
+  const fresh = wfCv.cloneNode(false); wfCv.replaceWith(fresh); wfCv = fresh;
+  wctx = wfCv.getContext("2d"); setTimeout(() => log("waterfall: 2D canvas (" + e.message + ")"), 0);
+}
+const tmpCv = document.createElement("canvas"), tctx = tmpCv.getContext("2d");
+let dpr = 1, SW = 0, SH = 0, WW = 0, WH = 0, viewDirty = true, lastView = null, rowImg = null, rowU32 = null;
+const AXIS_H = 22;
+
+const PALETTES = {
+  classic: [[0, 0, 0, 20], [0.18, 10, 20, 120], [0.38, 0, 120, 220], [0.55, 0, 220, 200], [0.7, 240, 230, 40], [0.85, 255, 120, 0], [1, 255, 30, 20]],
+  ember: [[0, 6, 4, 10], [0.25, 60, 12, 80], [0.5, 170, 40, 70], [0.72, 240, 120, 30], [0.9, 250, 210, 90], [1, 255, 250, 225]],
+  ice: [[0, 4, 8, 14], [0.3, 10, 50, 80], [0.55, 40, 130, 170], [0.78, 140, 215, 235], [1, 240, 252, 255]],
+  mono: [[0, 6, 8, 9], [1, 235, 240, 242]]
+};
+let LUT = new Uint32Array(256);
+function buildLut() {
+  const st = PALETTES[state.palette] || PALETTES.classic;
+  for (let i = 0; i < 256; i++) {
+    const x = i / 255; let k = 0; while (k < st.length - 2 && x > st[k + 1][0]) k++;
+    const a = st[k], b = st[k + 1], t = Math.min(1, Math.max(0, (x - a[0]) / (b[0] - a[0])));
+    const r = a[1] + (b[1] - a[1]) * t, g = a[2] + (b[2] - a[2]) * t, bl = a[3] + (b[3] - a[3]) * t;
+    LUT[i] = (255 << 24) | (Math.round(bl) << 16) | (Math.round(g) << 8) | Math.round(r);
+  }
+  if (wgl) wgl.setLut(LUT);
+  wfDirty = true;
+}
+let wfDirty = true;
+buildLut();
+
+function view() { const span = state.span / state.zoom; return { a: state.freqHz - span / 2, b: state.freqHz + span / 2 }; }
+
+function resize() {
+  dpr = Math.min(window.devicePixelRatio || 1, 2);
+  const view$ = $("view").getBoundingClientRect();
+  const total = view$.height - 9;
+  $("specWrap").style.height = Math.max(120, Math.round(total * state.split)) + "px";
+  const sr = specCv.getBoundingClientRect(), wr = wfCv.getBoundingClientRect();
+  const nSW = Math.max(1, Math.round(sr.width * dpr)), nSH = Math.max(1, Math.round(sr.height * dpr));
+  if (nSW !== SW || nSH !== SH) { SW = specCv.width = nSW; SH = specCv.height = nSH; }
+  const nWW = Math.max(1, Math.round(wr.width * dpr)), nWH = Math.max(1, Math.round(wr.height * dpr));
+  if (wgl && (nWW !== WW || nWH !== WH)) { WW = wfCv.width = nWW; WH = wfCv.height = nWH; wgl.alloc(Math.max(WH, 1024)); wfDirty = true; }
+  else if (nWW !== WW || nWH !== WH) {
+    // keep the waterfall history when the window changes size
+    if (WW && WH) { tmpCv.width = WW; tmpCv.height = WH; tctx.drawImage(wfCv, 0, 0); }
+    const oldW = WW, oldH = WH;
+    WW = wfCv.width = nWW; WH = wfCv.height = nWH;
+    wctx.fillStyle = "#04060a"; wctx.fillRect(0, 0, WW, WH);
+    if (oldW && oldH) wctx.drawImage(tmpCv, 0, 0, oldW, oldH, 0, 0, WW, oldH);
+    rowImg = wctx.createImageData(WW, 1); rowU32 = new Uint32Array(rowImg.data.buffer);
+  }
+  viewDirty = true;
+}
+
+// Move the waterfall picture when the visible frequency window changes (pan / zoom / retune)
+function shiftWaterfall(o, n) {
+  if (!WW || !wctx) return;
+  tmpCv.width = WW; tmpCv.height = WH; tctx.drawImage(wfCv, 0, 0);
+  wctx.fillStyle = "#04060a"; wctx.fillRect(0, 0, WW, WH);
+  const dx = (o.a - n.a) / (n.b - n.a) * WW, dw = (o.b - o.a) / (n.b - n.a) * WW;
+  wctx.imageSmoothingEnabled = dw < WW * 4;
+  wctx.drawImage(tmpCv, 0, 0, WW, WH, dx, 0, dw, WH);
+}
+
+// Resample bin data to W columns of the current view: max over bins when several fall in a column,
+// linear interpolation when the view is zoomed past the bin width. NaN where there is no data.
+function resample(src, W, v, out, fr) {
+  fr = fr || data;
+  const n = fr.n, f0 = fr.c - fr.fs / 2, bw = fr.fs / n, span = v.b - v.a;
+  for (let x = 0; x < W; x++) {
+    const fa = v.a + span * x / W, fb = v.a + span * (x + 1) / W;
+    const ia = (fa - f0) / bw - 0.5, ib = (fb - f0) / bw - 0.5;
+    if (ib < -0.5 || ia > n - 0.5) { out[x] = NaN; continue; }
+    const ja = Math.max(0, Math.ceil(ia)), jb = Math.min(n - 1, Math.floor(ib));
+    if (jb >= ja) { let m = -200; for (let j = ja; j <= jb; j++) if (src[j] > m) m = src[j]; out[x] = m; }
+    else {
+      const im = (ia + ib) / 2, j0 = Math.max(0, Math.min(n - 1, Math.floor(im))), j1 = Math.min(n - 1, j0 + 1), t = Math.min(1, Math.max(0, im - j0));
+      out[x] = src[j0] * (1 - t) + src[j1] * t;
+    }
+  }
+}
+
+let colTrace = new Float32Array(0), colPeak = new Float32Array(0), colRow = new Float32Array(0);
+function niceStep(span, px) {
+  const raw = span / Math.max(2, px / 95), p = Math.pow(10, Math.floor(Math.log10(raw)));
+  for (const m of [1, 2, 2.5, 5, 10]) if (m * p >= raw) return m * p;
+  return 10 * p;
+}
+const fmtMHz = (hz, dec) => (hz / 1e6).toFixed(dec);
+
+function drawSpectrum(v) {
+  const W = SW, H = SH, ph = H - AXIS_H * dpr;
+  sctx.fillStyle = "#070a0c"; sctx.fillRect(0, 0, W, H);
+  const lo = state.dbMin, hi = state.dbMax, yOf = (db) => (hi - db) / (hi - lo) * ph;
+  // dB grid
+  sctx.lineWidth = 1; sctx.strokeStyle = "rgba(150,180,195,0.10)"; sctx.fillStyle = "#7c8f99";
+  sctx.font = (11 * dpr) + "px 'IBM Plex Mono', monospace"; sctx.textBaseline = "middle";
+  const dStep = (hi - lo) > 80 ? 20 : 10;
+  for (let d = Math.ceil(lo / dStep) * dStep; d <= hi; d += dStep) {
+    const y = Math.round(yOf(d)) + 0.5; sctx.beginPath(); sctx.moveTo(0, y); sctx.lineTo(W, y); sctx.stroke();
+  }
+  // frequency grid + axis
+  const span = v.b - v.a, step = niceStep(span, W / dpr), dec = step >= 1e6 ? 0 : step >= 1e5 ? 1 : step >= 1e4 ? 2 : 3;
+  sctx.fillStyle = "#0e1418"; sctx.fillRect(0, ph, W, H - ph);
+  sctx.strokeStyle = "rgba(150,180,195,0.10)"; sctx.textAlign = "center"; sctx.fillStyle = "#9fb0b8";
+  for (let f = Math.ceil(v.a / step) * step; f <= v.b; f += step) {
+    const x = Math.round((f - v.a) / span * W) + 0.5;
+    sctx.beginPath(); sctx.moveTo(x, 0); sctx.lineTo(x, ph); sctx.stroke();
+    sctx.fillText(fmtMHz(f, dec), x, ph + (AXIS_H * dpr) / 2);
+  }
+  // band edges of the receiver
+  sctx.fillStyle = "rgba(0,0,0,0.35)";
+  if (v.a < FMIN - state.span / 2) { const x = (FMIN - state.span / 2 - v.a) / span * W; sctx.fillRect(0, 0, x, ph); }
+  if (data.n) {
+    if (colTrace.length !== W) { colTrace = new Float32Array(W); colPeak = new Float32Array(W); }
+    resample(data.avg, W, v, colTrace);
+    // trace with area fill
+    sctx.beginPath(); let started = false;
+    for (let x = 0; x < W; x++) {
+      const val = colTrace[x]; if (Number.isNaN(val)) { continue; }
+      const y = Math.max(0, Math.min(ph, yOf(val)));
+      if (!started) { sctx.moveTo(x, ph); sctx.lineTo(x, y); started = true; } else sctx.lineTo(x, y);
+    }
+    if (started) {
+      let xe = W - 1; while (xe > 0 && Number.isNaN(colTrace[xe])) xe--;
+      sctx.lineTo(xe, ph); sctx.closePath();
+      const grad = sctx.createLinearGradient(0, 0, 0, ph);
+      grad.addColorStop(0, "rgba(147,216,230,0.30)"); grad.addColorStop(1, "rgba(147,216,230,0.03)");
+      sctx.fillStyle = grad; sctx.fill();
+      sctx.beginPath(); let s2 = false;
+      for (let x = 0; x < W; x++) {
+        const val = colTrace[x]; if (Number.isNaN(val)) continue;
+        const y = Math.max(0, Math.min(ph, yOf(val)));
+        if (!s2) { sctx.moveTo(x, y); s2 = true; } else sctx.lineTo(x, y);
+      }
+      sctx.strokeStyle = "#93d8e6"; sctx.lineWidth = 1.2 * dpr; sctx.stroke();
+    }
+    if (state.peakHold && data.peak) {
+      resample(data.peak, W, v, colPeak);
+      sctx.beginPath(); let s3 = false;
+      for (let x = 0; x < W; x++) {
+        const val = colPeak[x]; if (Number.isNaN(val)) continue;
+        const y = Math.max(0, Math.min(ph, yOf(val)));
+        if (!s3) { sctx.moveTo(x, y); s3 = true; } else sctx.lineTo(x, y);
+      }
+      sctx.strokeStyle = "rgba(231,195,90,0.75)"; sctx.lineWidth = 1 * dpr; sctx.stroke();
+    }
+  }
+  // dB labels on the left, over a soft backing
+  sctx.textAlign = "left"; sctx.fillStyle = "#7c8f99";
+  for (let d = Math.ceil(lo / dStep) * dStep; d <= hi; d += dStep) {
+    const y = yOf(d); if (y < 20 * dpr || y > ph - 6 * dpr) continue;
+    const t = String(d); const tw = sctx.measureText(t).width;
+    sctx.fillStyle = "rgba(7,10,12,0.75)"; sctx.fillRect(4 * dpr, y - 7 * dpr, tw + 6 * dpr, 14 * dpr);
+    sctx.fillStyle = "#7c8f99"; sctx.fillText(t, 7 * dpr, y);
+  }
+  sctx.fillStyle = "#4b5c66"; sctx.fillText("dBFS", 7 * dpr, 10 * dpr);
+  // marker
+  if (marker != null && marker >= v.a && marker <= v.b) {
+    const x = Math.round((marker - v.a) / span * W) + 0.5;
+    sctx.strokeStyle = "#f0a443"; sctx.lineWidth = 1 * dpr; sctx.setLineDash([4 * dpr, 3 * dpr]);
+    sctx.beginPath(); sctx.moveTo(x, 0); sctx.lineTo(x, ph); sctx.stroke(); sctx.setLineDash([]);
+    const lvl = markerLevel();
+    if (lvl != null) {
+      const y = Math.max(4 * dpr, Math.min(ph - 4 * dpr, yOf(lvl)));
+      sctx.fillStyle = "#f0a443"; sctx.beginPath(); sctx.moveTo(x, y - 6 * dpr); sctx.lineTo(x + 5 * dpr, y); sctx.lineTo(x, y + 6 * dpr); sctx.lineTo(x - 5 * dpr, y); sctx.closePath(); sctx.fill();
+    }
+  }
+  // centre tick on the axis (tuned frequency)
+  const cx = Math.round((state.freqHz - v.a) / span * W);
+  sctx.fillStyle = "#f0a443"; sctx.beginPath(); sctx.moveTo(cx - 5 * dpr, H); sctx.lineTo(cx + 5 * dpr, H); sctx.lineTo(cx, H - 6 * dpr); sctx.closePath(); sctx.fill();
+}
+
+function markerLevel() {
+  if (marker == null || !data.n) return null;
+  const j = Math.round((marker - (data.c - data.fs / 2)) / (data.fs / data.n) - 0.5);
+  if (j < 0 || j >= data.n) return null;
+  let m = -200; for (let k = Math.max(0, j - 1); k <= Math.min(data.n - 1, j + 1); k++) if (data.avg[k] > m) m = data.avg[k];
+  return m;
+}
+
+let rowsImg = null, rowsU32 = null, wfKey = "";
+function drawWaterfallRows(v) {
+  if (wgl) {
+    const k = rowQueue.length;
+    for (const r of rowQueue.splice(0, k)) wgl.push(r);
+    const key = v.a + "/" + v.b + "/" + state.dbMin.toFixed(1) + "/" + state.dbMax.toFixed(1);
+    if (k || wfDirty || key !== wfKey) { wgl.draw(v, wfMin(), wfMax(), WW, WH); wfKey = key; wfDirty = false; }
+    return;
+  }
+  if (!WW || !rowQueue.length) return;
+  const rows = rowQueue.splice(0, Math.min(rowQueue.length, WH));
+  const k = rows.length;
+  if (colRow.length !== WW) colRow = new Float32Array(WW);
+  if (!rowsImg || rowsImg.width !== WW || rowsImg.height < k) { rowsImg = wctx.createImageData(WW, Math.max(k, 64)); rowsU32 = new Uint32Array(rowsImg.data.buffer); }
+  if (k < WH) wctx.drawImage(wfCv, 0, 0, WW, WH - k, 0, k, WW, WH - k);   // scroll down by k rows
+  const lo = wfMin(), kk = 255 / (wfMax() - lo);
+  for (let i = 0; i < k; i++) {
+    const r = rows[k - 1 - i];                 // newest on top
+    resample(r.db, WW, v, colRow, r);
+    const base = i * WW;
+    for (let x = 0; x < WW; x++) {
+      const val = colRow[x];
+      rowsU32[base + x] = Number.isNaN(val) ? 0xff0a0604 : LUT[Math.max(0, Math.min(255, ((val - lo) * kk) | 0))];
+    }
+  }
+  wctx.putImageData(rowsImg, 0, 0, 0, 0, WW, k);
+}
+// The waterfall shows single spectra (more spread than the averaged trace): give it a little more room
+const wfMin = () => (state.autoRange && wfAutoMin != null ? wfAutoMin : state.dbMin), wfMax = () => state.dbMax;
+
+// Same as the SDR++ ESP desktop/Android auto range (MainWindow::updateAutoRange): 10 updates/s,
+// noise floor = 25th percentile of the visible bins, top = peak held over 3 s (+6 dB), at least 35 dB,
+// widen in ~0.3 s, narrow back in ~5 s; the waterfall bottom sits 2 dB under the floor.
+let arT = 0, arInit = false, arPeaks = [], wfAutoMin = null;
+function autoRange(v, now) {
+  if (!state.autoRange || !data.n || now - arT < 100) return;
+  arT = now;
+  const f0 = data.c - data.fs / 2, bw = data.fs / data.n;
+  const ja = Math.max(0, Math.floor((v.a - f0) / bw)), jb = Math.min(data.n - 1, Math.ceil((v.b - f0) / bw));
+  const vals = []; let peak = -Infinity;
+  for (let j = ja; j <= jb; j++) { if (j === data.n / 2) continue; const x = data.db[j]; if (!(x > -139)) continue; vals.push(x); if (x > peak) peak = x; }
+  if (vals.length < 16) return;
+  vals.sort((a, b) => a - b);
+  const floor = vals[Math.floor(vals.length / 4)];
+  arPeaks.push([now, peak]);
+  while (arPeaks.length && now - arPeaks[0][0] > 3000) arPeaks.shift();
+  for (const ph of arPeaks) peak = Math.max(peak, ph[1]);
+  const tMin = floor - 6, tMax = Math.max(peak + 6, floor + 35), tWfMin = floor - 2;
+  if (!arInit) { state.dbMin = tMin; state.dbMax = tMax; wfAutoMin = tWfMin; arInit = true; syncRangeSliders(); return; }
+  const track = (cur, target, fast) => cur + (target - cur) * (fast ? 0.35 : 0.02);
+  state.dbMin = track(state.dbMin, tMin, tMin < state.dbMin);
+  state.dbMax = track(state.dbMax, tMax, tMax > state.dbMax);
+  wfAutoMin = track(wfAutoMin, tWfMin, tWfMin < wfAutoMin);
+  state.dbMin = Math.min(0, Math.max(-160, state.dbMin));
+  state.dbMax = Math.min(20, Math.max(state.dbMin + 10, state.dbMax));
+  syncRangeSliders();
+}
+function resetAutoRange() { arInit = false; arPeaks = []; }
+
+let statT = 0, statBytes = 0;
+function tick(now) {
+  const v = view();
+  if (!lastView || lastView.a !== v.a || lastView.b !== v.b) { if (lastView) shiftWaterfall(lastView, v); lastView = v; viewDirty = true; }
+  drawWaterfallRows(v);
+  if (data.fresh || viewDirty) { autoRange(v, now); drawSpectrum(v); updateMarkerRead(); data.fresh = false; viewDirty = false; }
+  if (now - statT > 500) updateStats(now);
+  requestAnimationFrame(tick);
+}
+
+function updateStats(now) {
+  frameTimes = frameTimes.filter((t) => now - t < 1000);
+  const st = source ? source.stats : { frames: 0, lost: 0, crc: 0, bytes: 0, restarts: 0 };
+  const dt = (now - statT) / 1000, rate = statT ? (st.bytes - statBytes) / dt / 1000 : 0;
+  statT = now; statBytes = st.bytes;
+  $("stFps").textContent = frameTimes.length;
+  $("stRate").textContent = rate.toFixed(rate < 10 ? 1 : 0) + " kB/s";
+  $("stFrames").textContent = st.frames;
+  $("stLost").textContent = st.lost; $("stLost").className = st.lost ? "bad" : "";
+  $("stCrc").textContent = st.crc; $("stCrc").className = st.crc ? "bad" : "";
+  $("stRestarts").textContent = st.restarts;
+}
+
+// ---------------------------------------------------------------- UI: frequency readout digits
+const DIG = [[1e9, "d"], ["."], [1e8, "d"], [1e7, "d"], [1e6, "d"], ["."], [1e5, "d"], [1e4, "d"], [1e3, "d"]];
+function buildDigits() {
+  const el = $("digits"); el.innerHTML = "";
+  for (const d of DIG) {
+    const s = document.createElement("span");
+    if (d.length === 1) { s.className = "sep"; s.textContent = d[0] === "." && el.children.length === 1 ? " " : "."; }
+    else { s.className = "d"; s.dataset.step = d[0]; s.tabIndex = 0; s.setAttribute("aria-label", "digit " + d[0] + " Hz"); }
+    el.appendChild(s);
+  }
+}
+function renderDigits() {
+  const mhz = state.freqHz / 1e6, str = mhz.toFixed(3).padStart(8, "0"); // e.g. 2437.000
+  const chars = str.replace(".", "");    // 7 digits: 1e9..1e3
+  let k = 0, leading = true;
+  for (const s of $("digits").children) {
+    if (!s.classList.contains("d")) continue;
+    const ch = chars[k++]; s.textContent = ch;
+    if (ch !== "0") leading = false;
+    s.classList.toggle("lead", leading && k < 4);
+  }
+  // first separator is a thin space between GHz and MHz, second a decimal point
+  $("freqIn").value = (state.freqHz / 1e6).toFixed(3);
+}
+function setFreq(hz, why) {
+  hz = Math.round(hz / 1e3) * 1e3;
+  if (hz < FMIN || hz > FMAX) {
+    if (why !== "drag" && why !== "wheel") toast("The ESP32-S3 tunes " + FMIN / 1e6 + "–" + FMAX / 1e6 + " MHz. Moved to " + ((hz < FMIN ? FMIN : FMAX) / 1e6).toFixed(0) + " MHz.");
+    hz = Math.max(FMIN, Math.min(FMAX, hz));
+  }
+  if (hz === state.freqHz) return;
+  state.freqHz = hz; renderDigits(); save(); viewDirty = true;
+  if (source) source.update(srcSettings());
+}
+
+// ---------------------------------------------------------------- UI: controls
+function segInit(id, key, parse, onChange) {
+  const seg = $(id);
+  const sync = () => { for (const b of seg.querySelectorAll("button")) b.classList.toggle("on", parse(b.dataset.v) === state[key]); };
+  seg.addEventListener("click", (e) => {
+    const b = e.target.closest("button"); if (!b || b.disabled) return;
+    state[key] = parse(b.dataset.v); sync(); save(); if (onChange) onChange();
+  });
+  sync(); return sync;
+}
+function pushSettings() { if (source) source.update(srcSettings()); }
+function resetTraces() { data.n = 0; data.avg = null; data.peak = null; viewDirty = true; resetAutoRange(); }
+const syncStep = segInit("stepSeg", "step", Number);
+const syncSpan = segInit("spanSeg", "span", Number, () => { buildBins(); pushSettings(); });
+const syncDet = segInit("detSeg", "maxHold", (v) => v === "1", () => { resetTraces(); pushSettings(); });
+const syncZoom = segInit("zoomSeg", "zoom", Number, () => { viewDirty = true; });
+function buildBins() {
+  const avail = (source && source.binsFor) ? source.binsFor(state.span) : [256, 1024, 2048];
+  if (!avail.includes(state.bins)) state.bins = avail.includes(1024) ? 1024 : avail[avail.length - 1];
+  const seg = $("binsSeg"); seg.innerHTML = "";
+  for (const b of avail) { const bt = document.createElement("button"); bt.type = "button"; bt.dataset.v = b; bt.textContent = b; seg.appendChild(bt); }
+  for (const b of seg.querySelectorAll("button")) b.classList.toggle("on", Number(b.dataset.v) === state.bins);
+  $("profileTag").textContent = (state.span / state.bins / 1e3).toFixed(1) + " kHz/bin";
+}
+$("binsSeg").addEventListener("click", (e) => {
+  const b = e.target.closest("button"); if (!b) return;
+  state.bins = Number(b.dataset.v); buildBins(); save(); pushSettings();
+});
+function syncRangeSliders() {
+  $("dbMax").value = Math.round(state.dbMax); $("dbMin").value = Math.round(state.dbMin);
+  $("dbMaxVal").textContent = Math.round(state.dbMax) + " dB"; $("dbMinVal").textContent = Math.round(state.dbMin) + " dB";
+}
+function initControls() {
+  $("gainIn").value = state.gain;
+  const gv = () => { $("gainVal").textContent = state.gain + " · " + gainDb(state.gain).toFixed(0) + " dB"; };
+  gv();
+  $("gainIn").addEventListener("input", () => { state.gain = Number($("gainIn").value); gv(); save(); pushSettings(); });
+  $("dcFix").checked = state.dcFix;
+  $("dcFix").addEventListener("change", () => { state.dcFix = $("dcFix").checked; save(); pushSettings(); });
+  $("autoRange").checked = state.autoRange;
+  $("autoRange").addEventListener("change", () => { state.autoRange = $("autoRange").checked; resetAutoRange(); save(); });
+  syncRangeSliders();
+  const range = (id, key) => $(id).addEventListener("input", () => {
+    state[key] = Number($(id).value);
+    if (state.dbMax - state.dbMin < 10) { if (key === "dbMax") state.dbMin = state.dbMax - 10; else state.dbMax = state.dbMin + 10; }
+    state.autoRange = false; $("autoRange").checked = false; syncRangeSliders(); save(); viewDirty = true;
+  });
+  range("dbMax", "dbMax"); range("dbMin", "dbMin");
+  $("avgIn").value = state.avg; $("avgVal").textContent = state.avg.toFixed(2);
+  $("avgIn").addEventListener("input", () => { state.avg = Number($("avgIn").value); $("avgVal").textContent = state.avg.toFixed(2); save(); });
+  const wfLbl = () => { $("wfRateVal").textContent = state.wfRate >= WF_ALL ? "every" : state.wfRate + " /s"; };
+  $("wfRate").value = state.wfRate; wfLbl();
+  $("wfRate").addEventListener("input", () => { state.wfRate = Number($("wfRate").value); wfLbl(); save(); });
+  $("keepAwake").checked = state.keepAwake;
+  $("keepAwake").addEventListener("change", () => { state.keepAwake = $("keepAwake").checked; save(); syncWakeLock(); });
+  $("autoConnect").checked = state.autoConnect;
+  $("autoConnect").addEventListener("change", () => { state.autoConnect = $("autoConnect").checked; save(); });
+  segInit("expModeSeg", "expMode", String);
+  segInit("expSpanSeg", "expSpan", String);
+  $("expN").value = state.expN;
+  $("expN").addEventListener("change", () => { state.expN = Math.max(1, Math.round(Number($("expN").value) || 1)); $("expN").value = state.expN; save(); });
+  $("logIv").value = state.logIv;
+  $("logIv").addEventListener("change", () => { state.logIv = Math.max(0.1, Number($("logIv").value) || 1); $("logIv").value = state.logIv; save(); });
+  $("logBtn").addEventListener("click", () => (specLog ? stopLog() : startLog()));
+  $("debugBtn").addEventListener("click", exportDebug);
+  $("playBtn").addEventListener("click", togglePlay);
+  $("scrim").addEventListener("click", closeRack);
+  $("portCardOk").addEventListener("click", () => { $("portCard").hidden = true; });
+  $("palette").value = state.palette;
+  $("palette").addEventListener("change", () => { state.palette = $("palette").value; buildLut(); save(); });
+  $("peakHold").checked = state.peakHold;
+  $("peakHold").addEventListener("change", () => { state.peakHold = $("peakHold").checked; if (data.peak && data.avg) data.peak.set(data.avg); save(); viewDirty = true; });
+  $("peakClear").addEventListener("click", () => { if (data.peak && data.avg) data.peak.set(data.avg); viewDirty = true; });
+  $("peakFind").addEventListener("click", markerToPeak);
+  $("markerOff").addEventListener("click", () => { marker = null; viewDirty = true; });
+  $("freqIn").addEventListener("change", () => { const f = parseFloat($("freqIn").value); if (isFinite(f)) setFreq(f * 1e6); });
+  $("ppmIn").value = state.ppm;
+  $("ppmIn").addEventListener("change", () => { const p = parseFloat($("ppmIn").value); state.ppm = isFinite(p) ? p : 0; save(); pushSettings(); });
+  $("csvBtn").addEventListener("click", startCapture);
+  if (EMBEDDED) { $("exportSect").hidden = true; $("debugBtn").hidden = true; }   // downloads are blocked inside embedded previews
+  $("rackBtn").addEventListener("click", () => { const open = !$("rack").classList.contains("open"); setRack(open); if (open) rackTouched(); });
+  $("connectBtn").addEventListener("click", () => (mode === "serial" ? disconnect() : connect(false)));
+  $("allPortsBtn").addEventListener("click", () => connect(true));
+  $("demoBtn").addEventListener("click", () => { if (mode === "serial") disconnect(); else startDemo(); });
+}
+
+function markerToPeak() {
+  if (!data.n) return;
+  const v = view(); let best = -1e9, bf = null;
+  for (let j = 0; j < data.n; j++) {
+    const f = data.c - data.fs / 2 + (j + 0.5) * data.fs / data.n;
+    if (f < v.a || f > v.b || j === data.n / 2) continue;
+    if (data.avg[j] > best) { best = data.avg[j]; bf = f; }
+  }
+  marker = bf; viewDirty = true;
+}
+function updateMarkerRead() {
+  const el = $("markerRead");
+  if (marker == null) { el.textContent = ""; return; }
+  const l = markerLevel();
+  el.textContent = "Marker " + (marker / 1e6).toFixed(3) + " MHz" + (l != null ? "  " + l.toFixed(1) + " dBFS" : "");
+}
+// ---------------------------------------------------------------- pointer interaction
+function bindDigits() {
+  const el = $("digits");
+  el.addEventListener("wheel", (e) => {
+    const d = e.target.closest(".d"); if (!d) return;
+    e.preventDefault(); setFreq(state.freqHz + Math.sign(-e.deltaY) * Number(d.dataset.step));
+  }, { passive: false });
+  el.addEventListener("pointerdown", (e) => {
+    const d = e.target.closest(".d"); if (!d) return;
+    const r = d.getBoundingClientRect(), up = e.clientY < r.top + r.height / 2;
+    setFreq(state.freqHz + (up ? 1 : -1) * Number(d.dataset.step));
+  });
+  el.addEventListener("keydown", (e) => {
+    const d = e.target.closest(".d"); if (!d) return;
+    if (e.key === "ArrowUp") { setFreq(state.freqHz + Number(d.dataset.step)); e.preventDefault(); }
+    if (e.key === "ArrowDown") { setFreq(state.freqHz - Number(d.dataset.step)); e.preventDefault(); }
+  });
+}
+
+function bindPlot(cv, isSpec) {
+  const pts = new Map(); let drag = null, pinch = null;
+  const fAt = (clientX) => { const r = cv.getBoundingClientRect(), v = view(); return v.a + (clientX - r.left) / r.width * (v.b - v.a); };
+  cv.addEventListener("pointerdown", (e) => {
+    cv.setPointerCapture(e.pointerId); pts.set(e.pointerId, e.clientX);
+    if (pts.size === 1) drag = { x0: e.clientX, f0: state.freqHz, moved: false };
+    if (pts.size === 2) { const xs = [...pts.values()]; pinch = { d0: Math.abs(xs[0] - xs[1]) || 1, z0: state.zoom }; drag = null; }
+  });
+  cv.addEventListener("pointermove", (e) => {
+    if (isSpec) hover(e);
+    if (!pts.has(e.pointerId)) return;
+    pts.set(e.pointerId, e.clientX);
+    if (pinch && pts.size === 2) {
+      const xs = [...pts.values()], d = Math.abs(xs[0] - xs[1]) || 1;
+      setZoom(pinch.z0 * d / pinch.d0); return;
+    }
+    if (drag) {
+      const r = cv.getBoundingClientRect(), dx = e.clientX - drag.x0;
+      if (Math.abs(dx) > 4) drag.moved = true;
+      if (drag.moved) setFreq(drag.f0 - dx / r.width * (state.span / state.zoom), "drag");
+    }
+  });
+  const end = (e) => {
+    if (drag && !drag.moved && pts.size === 1) { marker = fAt(e.clientX); viewDirty = true; }
+    pts.delete(e.pointerId); if (pts.size < 2) pinch = null; if (!pts.size) drag = null;
+  };
+  cv.addEventListener("pointerup", end); cv.addEventListener("pointercancel", end);
+  cv.addEventListener("pointerleave", () => { if (isSpec) $("hoverRead").hidden = true; });
+  cv.addEventListener("dblclick", (e) => setFreq(fAt(e.clientX)));
+  cv.addEventListener("wheel", (e) => {
+    e.preventDefault();
+    if (e.ctrlKey || e.metaKey) setZoom(state.zoom * (e.deltaY < 0 ? 1.25 : 0.8));
+    else setFreq(state.freqHz + Math.sign(-e.deltaY || e.deltaX) * state.step, "wheel");
+  }, { passive: false });
+}
+function setZoom(z) {
+  const levels = [1, 2, 4, 8]; z = Math.max(1, Math.min(8, z));
+  state.zoom = levels.reduce((a, b) => (Math.abs(Math.log(b / z)) < Math.abs(Math.log(a / z)) ? b : a));
+  syncZoom(); save(); viewDirty = true;
+}
+function hover(e) {
+  const r = specCv.getBoundingClientRect(), v = view(), f = v.a + (e.clientX - r.left) / r.width * (v.b - v.a);
+  const y = e.clientY - r.top, ph = r.height - AXIS_H;
+  if (y > ph) { $("hoverRead").hidden = true; return; }
+  const db = state.dbMax - y / ph * (state.dbMax - state.dbMin);
+  const hr = $("hoverRead"); hr.hidden = false;
+  hr.textContent = (f / 1e6).toFixed(3) + " MHz  " + db.toFixed(1) + " dB";
+  const left = Math.min(r.width - 170, e.clientX - r.left + 12);
+  hr.style.left = Math.max(4, left) + "px"; hr.style.top = Math.max(4, y - 26) + "px";
+}
+function bindDivider() {
+  const dv = $("divider"); let on = false;
+  dv.addEventListener("pointerdown", (e) => { on = true; dv.setPointerCapture(e.pointerId); });
+  dv.addEventListener("pointermove", (e) => {
+    if (!on) return; const r = $("view").getBoundingClientRect();
+    state.split = Math.max(0.18, Math.min(0.8, (e.clientY - r.top) / r.height)); resize();
+  });
+  dv.addEventListener("pointerup", () => { on = false; save(); });
+  dv.addEventListener("keydown", (e) => {
+    if (e.key === "ArrowUp") state.split = Math.max(0.18, state.split - 0.04);
+    else if (e.key === "ArrowDown") state.split = Math.min(0.8, state.split + 0.04); else return;
+    e.preventDefault(); resize(); save();
+  });
+}
+document.addEventListener("keydown", (e) => {
+  if (e.target.closest("input, select, .digits")) return;
+  if (e.key === "ArrowRight") setFreq(state.freqHz + state.step);
+  else if (e.key === "ArrowLeft") setFreq(state.freqHz - state.step);
+  else if (e.key === "+" || e.key === "=") setZoom(state.zoom * 2);
+  else if (e.key === "-") setZoom(state.zoom / 2);
+  else if (e.key === "p") markerToPeak();
+});
+
+// ---------------------------------------------------------------- small UI helpers
+const EMBEDDED = window.top !== window;
+let toastTimer = null;
+function toast(msg, bad) {
+  const t = $("toast"); t.textContent = msg; t.className = "toast" + (bad ? " bad" : ""); t.hidden = false;
+  clearTimeout(toastTimer); toastTimer = setTimeout(() => { t.hidden = true; }, 5000);
+}
+function setRack(open) {
+  $("rack").classList.toggle("open", open); $("rackBtn").setAttribute("aria-expanded", String(open));
+  $("scrim").hidden = !open;
+}
+function closeRack() { setRack(false); }
+
+// Settings rack: tucks itself away after a while without use, comes back from the edge tab,
+// the right screen edge or the S key, and stays out for good when pinned (like SDR++ ESP)
+const RACK_IDLE_MS = 8000;
+let rackUse = performance.now(), rackHover = false;
+const isNarrow = () => window.matchMedia("(max-width: 860px)").matches;
+function rackTouched() { rackUse = performance.now(); }
+function setRackAway(away) {
+  $("app").classList.toggle("rack-away", away);
+  $("rackTab").hidden = !away;
+  if (away && $("rack").contains(document.activeElement)) document.activeElement.blur();
+}
+function showRack() { if (isNarrow()) setRack(true); else setRackAway(false); rackTouched(); }
+function rackShown() { return isNarrow() ? $("rack").classList.contains("open") : !$("app").classList.contains("rack-away"); }
+function setPinUi() { $("pinBtn").setAttribute("aria-pressed", String(!!state.rackPinned)); $("pinBtn").title = state.rackPinned ? "Let the settings hide when not in use" : "Keep the settings open"; }
+function initRackAutoHide() {
+  const r = $("rack");
+  for (const ev of ["pointerdown", "wheel", "keydown", "input", "focusin", "scroll"]) r.addEventListener(ev, rackTouched, { passive: true });
+  r.addEventListener("pointerenter", () => { rackHover = true; rackTouched(); });
+  r.addEventListener("pointerleave", () => { rackHover = false; rackTouched(); });
+  $("rackTab").addEventListener("click", showRack);
+  $("pinBtn").addEventListener("click", () => { state.rackPinned = !state.rackPinned; save(); setPinUi(); showRack(); });
+  // desktop: moving the pointer onto the right screen edge brings the settings back
+  document.addEventListener("pointermove", (e) => { if (e.pointerType === "mouse" && !isNarrow() && e.clientX >= window.innerWidth - 6 && !rackShown()) showRack(); });
+  document.addEventListener("keydown", (e) => {
+    if ((e.key === "s" || e.key === "S") && !e.ctrlKey && !e.metaKey && !e.altKey && !e.target.closest("input, select, textarea")) { rackShown() ? (isNarrow() ? setRack(false) : setRackAway(true)) : showRack(); }
+  });
+  window.addEventListener("resize", () => { if (isNarrow()) setRackAway(false); });
+  setPinUi();
+  setInterval(() => {
+    if (state.rackPinned || flashing || connecting || rackHover || !rackShown()) return;
+    const a = document.activeElement, typing = a && r.contains(a) && a.matches("input[type=number], select");
+    if (typing || performance.now() - rackUse < RACK_IDLE_MS) return;
+    if (isNarrow()) setRack(false); else setRackAway(true);
+  }, 500);
+}
+function downloadText(name, text, type) {
+  const blob = new Blob([text], { type: type || "text/plain" });
+  const a = document.createElement("a"); a.href = URL.createObjectURL(blob); a.download = name;
+  document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+}
+const stamp = () => new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
+
+// ---------------------------------------------------------------- play / stop
+function setPlayUi() {
+  $("playIcon").innerHTML = state.playing ? '<rect x="3" y="3" width="10" height="10" rx="1.5"/>' : '<path d="M4 2.5v11l9.5-5.5z"/>';
+  $("playBtn").setAttribute("aria-label", state.playing ? "Stop" : "Start");
+}
+async function togglePlay() {
+  state.playing = !state.playing; save(); setPlayUi();
+  if (!source) return;
+  if (state.playing) { source.resume && source.resume(); if (mode === "demo") setStatus("demo", "Demo"); }
+  else { source.pause && await source.pause(); if (mode === "demo") setStatus("idle", "Stopped"); }
+}
+
+// ---------------------------------------------------------------- keep the screen on
+let wakeLock = null;
+async function syncWakeLock() {
+  const want = state.keepAwake && document.visibilityState === "visible";
+  try {
+    if (want && !wakeLock && navigator.wakeLock) { wakeLock = await navigator.wakeLock.request("screen"); wakeLock.addEventListener("release", () => { wakeLock = null; }); }
+    else if (!want && wakeLock) { await wakeLock.release(); wakeLock = null; }
+  } catch (e) { /* not granted: fine */ }
+}
+document.addEventListener("visibilitychange", syncWakeLock);
+
+// ---------------------------------------------------------------- spectrum export (CSV)
+// Capture: snapshot (one spectrum), average (linear power) or max hold over N spectra; full or visible span.
+// Log: one row per interval (average of the spectra in it), wide format with a frequency header;
+// a new file starts when the frequency axis changes.
+let capture = null, specLog = null;
+function binRange(n, fs, c) {
+  if (state.expSpan !== "view") return [0, n - 1];
+  const v = view(), f0 = c - fs / 2, bw = fs / n;
+  return [Math.max(0, Math.floor((v.a - f0) / bw)), Math.min(n - 1, Math.ceil((v.b - f0) / bw) - 1)];
+}
+const binHz = (j, n, fs, c) => Math.round(c - fs / 2 + (j + 0.5) * fs / n);
+function startCapture() {
+  if (!data.n) { toast("No spectrum yet."); return; }
+  const N = state.expMode === "snap" ? 1 : state.expN;
+  capture = { mode: state.expMode, N, got: 0, acc: null, geo: null };
+  $("expState").textContent = N > 1 ? "Collecting 0 / " + N : "";
+}
+function exportTap(db, n, fs, c) {
+  if (capture) {
+    const geo = n + "/" + fs + "/" + c;
+    if (capture.geo && capture.geo !== geo) { capture.acc = null; capture.got = 0; }   // retuned: start over
+    capture.geo = geo;
+    if (!capture.acc) capture.acc = new Float64Array(n).fill(capture.mode === "max" ? -1e9 : 0);
+    for (let j = 0; j < n; j++) {
+      if (capture.mode === "max") { if (db[j] > capture.acc[j]) capture.acc[j] = db[j]; }
+      else capture.acc[j] += Math.pow(10, db[j] / 10);
+    }
+    capture.got++;
+    if (capture.N > 1 && capture.got % 10 === 0) $("expState").textContent = "Collecting " + capture.got + " / " + capture.N;
+    if (capture.got >= capture.N) {
+      const [ja, jb] = binRange(n, fs, c), rows = ["frequency_hz,level_dbfs"];
+      for (let j = ja; j <= jb; j++) {
+        const v = capture.mode === "max" ? capture.acc[j] : 10 * Math.log10(capture.acc[j] / capture.got);
+        rows.push(binHz(j, n, fs, c) + "," + v.toFixed(2));
+      }
+      const what = capture.mode === "snap" ? "snapshot" : capture.mode + capture.got;
+      downloadText("esp-spectrum-" + what + "-" + stamp() + ".csv", rows.join("\n") + "\n", "text/csv");
+      $("expState").textContent = "Saved " + (jb - ja + 1) + " bins";
+      capture = null;
+    }
+  }
+  if (specLog) {
+    const geo = n + "/" + fs + "/" + c + "/" + state.expSpan + (state.expSpan === "view" ? "/" + state.zoom : "");
+    if (specLog.geo !== geo) { flushLog(); specLog.geo = geo; specLog.n = n; specLog.fs = fs; specLog.c = c; specLog.range = binRange(n, fs, c); specLog.acc = new Float64Array(n); specLog.cnt = 0; specLog.t0 = performance.now(); }
+    for (let j = 0; j < n; j++) specLog.acc[j] += Math.pow(10, db[j] / 10);
+    specLog.cnt++;
+    if (performance.now() - specLog.t0 >= state.logIv * 1000) {
+      const [ja, jb] = specLog.range, cells = [new Date().toISOString()];
+      for (let j = ja; j <= jb; j++) cells.push((10 * Math.log10(specLog.acc[j] / specLog.cnt)).toFixed(2));
+      specLog.rows.push(cells.join(","));
+      specLog.acc.fill(0); specLog.cnt = 0; specLog.t0 = performance.now();
+      $("logState").textContent = "Logging: " + (specLog.rowsTotal + specLog.rows.length) + " rows, " + specLog.files + " file(s) saved";
+    }
+  }
+}
+function flushLog() {
+  if (!specLog || !specLog.rows.length) return;
+  const [ja, jb] = specLog.range, head = ["time_utc"];
+  for (let j = ja; j <= jb; j++) head.push(binHz(j, specLog.n, specLog.fs, specLog.c));
+  downloadText("esp-spectrum-log-" + stamp() + ".csv", head.join(",") + "\n" + specLog.rows.join("\n") + "\n", "text/csv");
+  specLog.rowsTotal += specLog.rows.length; specLog.rows = []; specLog.files++;
+}
+function startLog() {
+  specLog = { geo: "", rows: [], rowsTotal: 0, files: 0 };
+  $("logBtn").textContent = "Stop and save"; $("logState").textContent = "Logging: waiting for the first interval";
+}
+function stopLog() {
+  flushLog();
+  $("logState").textContent = specLog.files ? "Saved " + specLog.rowsTotal + " rows in " + specLog.files + " file(s)" : "Nothing logged";
+  specLog = null; $("logBtn").textContent = "Start log";
+}
+
+// ---------------------------------------------------------------- debug report
+const PAGE_VERSION = "0.4.0";
+window.addEventListener("error", (e) => log("[JS] " + e.message + " @ " + (e.filename || "").split("/").pop() + ":" + e.lineno));
+window.addEventListener("unhandledrejection", (e) => log("[JS] unhandled: " + ((e.reason && e.reason.message) || e.reason)));
+function exportDebug() {
+  const st = source ? source.stats : {}, bv = fwState.bundle || {};
+  let portInfo = "none";
+  try { const p = boardPort || (source && source.port); if (p) { const i = p.getInfo(); portInfo = "VID " + (i.usbVendorId || 0).toString(16) + " PID " + (i.usbProductId || 0).toString(16); } } catch (e) {}
+  const lines = [
+    "Z2 Web SDR debug report " + new Date().toISOString(),
+    "page: " + PAGE_VERSION + ", bundled firmware " + (bv.build_date || "-") + " " + (bv.revision || "").slice(0, 7),
+    "browser: " + navigator.userAgent,
+    "screen: " + screen.width + "x" + screen.height + " @" + (window.devicePixelRatio || 1) + ", window " + innerWidth + "x" + innerHeight,
+    "web serial: " + ("serial" in navigator) + ", wake lock: " + ("wakeLock" in navigator) + ", embedded: " + EMBEDDED,
+    "mode: " + mode + ", port: " + portInfo + ", firmware: " + (source && source.fwInfo ? source.fwInfo : "-") + (source && source.fwBuild ? " (" + source.fwBuild + ")" : ""),
+    "caps: " + (source && source.caps ? source.caps.trim() : "-"),
+    "stats: " + JSON.stringify({ frames: st.frames, lost: st.lost, crc: st.crc, bytes: st.bytes, restarts: st.restarts }),
+    "", "settings:", JSON.stringify(state, null, 1), "", "log:", ...logLines
+  ];
+  downloadText("z2-web-sdr-report-" + stamp() + ".txt", lines.join("\n") + "\n");
+}
+
+// ---------------------------------------------------------------- hot-plug / auto start
+const BRIDGE_VIDS = [0x1a86, 0x10c4, 0x0403, 0x067b];
+function checkPortKind(port) {
+  try { const vid = port.getInfo().usbVendorId; if (BRIDGE_VIDS.includes(vid)) { $("portCard").hidden = false; return false; } } catch (e) {}
+  return true;
+}
+async function autoStart(port) {
+  if (!state.autoConnect || mode === "serial" || connecting || flashing) return;
+  try { if (port.getInfo().usbVendorId !== 0x303a) return; } catch (e) { return; }
+  log("board found, starting");
+  await connect(false, port, true);
+}
+if (navigator.serial) navigator.serial.addEventListener("connect", (e) => { setTimeout(() => autoStart(e.target), 800); });
+
+// ---------------------------------------------------------------- sources
+const hooks = {
+  onSpectrum,
+  onStatus: (k, t) => { setStatus(k, t); if (k === "err" && mode === "serial") { mode = "none"; $("connectLabel").textContent = "Connect"; } },
+  log,
+  onInfo: (src) => { $("fwInfo").textContent = "Firmware " + src.fwInfo; }
+};
+function startDemo() {
+  if (source && source.stop) source.stop();
+  source = new DemoSource(hooks); mode = "demo";
+  resetTraces(); buildBins(); source.start(srcSettings());
+  setStatus("demo", state.playing ? "Demo" : "Stopped"); $("demoNote").hidden = false; $("fwInfo").textContent = source.fwInfo;
+  if (!state.playing) source.pause();
+  $("demoBtn").textContent = "Run demo"; $("demoBtn").disabled = true;
+}
+async function connect(anyPort, existingPort, quiet) {
+  if (!SerialSource.supported()) {
+    $("srcNote").innerHTML = "This browser has no USB serial access. Use <b>Chrome</b> or <b>Edge</b> on a computer (Windows, macOS, Linux) and open this page from a file or an https address.";
+    return;
+  }
+  if (connecting || flashing) return;
+  const prev = source;
+  const s = new SerialSource(hooks);
+  setStatus("busy", "Connecting");
+  connecting = true; updateFwUi(); $("connectBtn").disabled = true; rackTouched();
+  try {
+    await s.connect(anyPort, existingPort);
+    connecting = false; $("connectBtn").disabled = false; updateFwUi(); rackTouched();
+    checkPortKind(s.port);
+  } catch (e) {
+    connecting = false; $("connectBtn").disabled = false;
+    if (e && e.port) boardPort = e.port;
+    if (e && e.needsFirmware) { fwState.needs = true; updateFwUi(); showRack(); }
+    const msg = e && e.name === "NotFoundError" ? "No port selected." :
+      e && e.name === "SecurityError" ? "USB serial access is blocked in this embedded preview. Open the downloaded HTML file in Chrome or Edge." :
+      e && e.name === "NetworkError" ? "The port is busy. Close SDR++ or any other program that has it open, then try again." :
+      (e && e.message) || String(e);
+    log("connect failed: " + msg);
+    if (e && e.port) checkPortKind(e.port);
+    if (quiet && !(e && e.needsFirmware)) { setStatus(mode === "demo" ? "demo" : "err", mode === "demo" ? "Demo" : "Not connected"); return; }
+    $("srcNote").textContent = msg;
+    setStatus(mode === "demo" ? "demo" : "err", mode === "demo" ? "Demo" : "Not connected");
+    return;
+  }
+  if (prev && prev.stop) prev.stop();
+  source = s; mode = "serial"; boardPort = s.port;
+  fwState.needs = s.fwInfo.startsWith("old") || (!!s.fwBuild && !!fwState.bundle && s.fwBuild < (fwState.bundle.build_timestamp || ""));
+  updateFwUi();
+  resetTraces(); buildBins();
+  $("demoNote").hidden = true; $("demoBtn").disabled = false; $("demoBtn").textContent = "Back to demo";
+  $("connectLabel").textContent = "Disconnect"; document.querySelector("#connectBtn .wide-only").hidden = true;
+  $("srcNote").textContent = "Connected. Settings apply within about a third of a second; the spectrum restarts on every change.";
+  setStatus("busy", "Starting");
+  if (!state.playing) { state.playing = true; save(); setPlayUi(); }
+  source.update(srcSettings());
+}
+async function disconnect() {
+  const s = source; mode = "none";
+  $("connectLabel").textContent = "Connect"; document.querySelector("#connectBtn .wide-only").hidden = false;
+  setStatus("busy", "Closing");
+  if (s && s.close) await s.close();
+  startDemo();
+}
+if (navigator.serial) navigator.serial.addEventListener("disconnect", () => { if (mode === "serial") { log("board unplugged"); disconnect(); } });
+
+// ---------------------------------------------------------------- firmware update UI
+let connecting = false, boardPort = null, flashing = false, armedUntil = 0, armTimer = null, customBundle = null;
+const fwState = { bundle: embeddedVersion(), needs: false };
+const UART_VIDS = [0x303a, 0x1a86, 0x10c4, 0x0403, 0x067b];
+function fwLabel() { const v = customBundle ? customBundle.version : fwState.bundle; return v ? (v.build_date || "") : ""; }
+function updateFwUi() {
+  const b = $("flashBtn");
+  if (!fwState.bundle && !customBundle) { $("fwBox").hidden = true; return; }
+  const v = fwState.bundle;
+  $("fwBundleInfo").textContent = customBundle ? "Selected build: " + (customBundle.version.build_date || "custom") + " " + (customBundle.version.revision || "").slice(0, 7) + " (" + customBundle.images.length + " images)"
+    : "Bundled firmware " + v.build_date + " · " + (v.revision || "").slice(0, 7);
+  const armed = performance.now() < armedUntil;
+  b.textContent = armed ? "Tap again to flash the board" : (fwState.needs ? "Install firmware " : "Reinstall firmware ") + fwLabel();
+  b.className = "btn block" + (armed ? " armed" : fwState.needs ? " warn" : "");
+  b.disabled = flashing || connecting;
+  $("fwNeed").hidden = !fwState.needs || flashing;
+}
+function flashUi(stage, frac) { $("flashStage").textContent = stage; $("flashBar").style.width = (frac * 100).toFixed(1) + "%"; }
+async function startFlash() {
+  if (flashing || connecting) return;
+  if (!SerialSource.supported()) {
+    showFlashResult(false, "This browser has no USB serial access. Use Chrome or Edge on a computer, and open the page file directly (not in an embedded preview).");
+    return;
+  }
+  flashing = true; updateFwUi(); showRack();
+  $("flashResult").hidden = true; $("flashProg").hidden = false; flashUi("Starting", 0);
+  let port = boardPort, ok = false, msg = "";
+  try {
+    if (mode === "serial" && source && source.port) { port = source.port; await source.close(); }
+    if (source && source.stop) source.stop();
+    mode = "flash"; setStatus("busy", "Flashing"); $("connectLabel").textContent = "Connect";
+    if (!port) port = await navigator.serial.requestPort({ filters: UART_VIDS.map((v) => ({ usbVendorId: v })) });
+    const info = port.getInfo(), usbJtag = !info.usbVendorId || info.usbVendorId === 0x303a;
+    const bundle = customBundle || await loadEmbeddedBundle();
+    log("flash: " + bundle.images.length + " images, " + (usbJtag ? "native USB" : "USB-UART bridge") + " port");
+    const f = new EspFlasher(port, log);
+    port = await f.flash(bundle.images, usbJtag, flashUi);
+    boardPort = port; ok = true;
+    msg = "Firmware " + (bundle.version.build_date || "") + " installed. The board restarts and the spectrum starts.";
+  } catch (e) {
+    msg = e && e.name === "NotFoundError" ? "No port selected." :
+      e && e.name === "NetworkError" ? "The port is busy. Close SDR++ or any other program that has it open, then try again." :
+      e && e.name === "SecurityError" ? "USB serial access is blocked in this embedded preview. Open the page file in Chrome or Edge." :
+      "Firmware update failed: " + ((e && e.message) || String(e));
+  }
+  log("flash: " + msg);
+  flashing = false; $("flashProg").hidden = true;
+  showFlashResult(ok, msg);
+  if (ok) {
+    fwState.needs = false; updateFwUi();
+    await sleep(1500);   // let the new firmware boot
+    await connect(false, boardPort);
+  } else { updateFwUi(); startDemo(); }
+}
+function showFlashResult(ok, msg) { const r = $("flashResult"); r.hidden = false; r.textContent = msg; r.className = "note result " + (ok ? "ok" : "bad"); }
+$("flashBtn").addEventListener("click", () => {
+  if (performance.now() < armedUntil) { armedUntil = 0; clearTimeout(armTimer); updateFwUi(); startFlash(); return; }
+  armedUntil = performance.now() + 5000; updateFwUi();
+  clearTimeout(armTimer); armTimer = setTimeout(updateFwUi, 5050);
+});
+$("fwPickBtn").addEventListener("click", () => $("fwPick").click());
+$("fwPick").addEventListener("change", async () => {
+  try { customBundle = await loadBundleFromFiles($("fwPick").files); showFlashResult(true, "Build loaded. The firmware button now flashes it."); }
+  catch (e) { customBundle = null; showFlashResult(false, e.message); }
+  updateFwUi();
+});
+
+// ---------------------------------------------------------------- boot
+buildDigits(); renderDigits(); initControls(); buildBins(); bindDigits();
+bindPlot(specCv, true); bindPlot(wfCv, false); bindDivider();
+new ResizeObserver(resize).observe($("view"));
+resize();
+if (!SerialSource.supported()) $("srcNote").innerHTML = "This browser has no USB serial access, so the page runs on demo data. For a live board use <b>Chrome</b> or <b>Edge</b> on a computer.";
+updateFwUi(); setPlayUi(); syncWakeLock(); initRackAutoHide();
+if (state.freqHz < FMIN || state.freqHz > FMAX) {
+  const old = state.freqHz; state.freqHz = Math.max(FMIN, Math.min(FMAX, state.freqHz)); renderDigits(); save();
+  toast("The saved frequency " + (old / 1e6).toFixed(3) + " MHz is outside the ESP32-S3's range. Moved to " + (state.freqHz / 1e6).toFixed(0) + " MHz.");
+}
+startDemo();
+requestAnimationFrame(tick);
+if (navigator.serial && !EMBEDDED) navigator.serial.getPorts().then((ports) => { const p = ports.find((x) => { try { return x.getInfo().usbVendorId === 0x303a; } catch (e) { return false; } }); if (p) autoStart(p); }).catch(() => {});
+</script>
+</body>
+</html>
