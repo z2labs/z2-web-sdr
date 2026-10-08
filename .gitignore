@@ -4,3 +4,5 @@ test/stream.bin
 test/expected.json
 spec_capture.bin
 spec_capture.txt
+render.log
+render.err
