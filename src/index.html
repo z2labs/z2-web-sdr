@@ -314,21 +314,19 @@ input[type=number].short { width: 64px; flex: 0 0 64px; }
       <h2>Tuning</h2>
       <div class="row"><label for="freqIn">Centre</label><input class="grow" id="freqIn" type="number" step="0.001" min="2204" max="2804" inputmode="decimal"><span class="val">MHz</span></div>
       <div class="row"><span class="lbl">Step</span>
-        <div class="seg" id="stepSeg">
-          <button type="button" data-v="100000">0.1</button><button type="button" data-v="1000000">1</button><button type="button" data-v="5000000">5</button><button type="button" data-v="20000000">20</button>
-        </div><span class="val">MHz</span></div>
+        <div class="seg" id="stepSeg"></div><span class="val" id="stepUnit">MHz</span></div>
       <div class="row"><label for="ppmIn">Crystal</label><input class="grow" id="ppmIn" type="number" step="0.1" min="-50" max="50"><span class="val">ppm</span></div>
     </section>
 
     <section class="sect">
       <h2>Spectrum <span id="profileTag"></span></h2>
       <div class="row"><span class="lbl">Span</span>
-        <div class="seg" id="spanSeg"><button type="button" data-v="16000000">16</button><button type="button" data-v="40000000">40</button><button type="button" data-v="80000000">80</button></div><span class="val">MHz</span></div>
+        <div class="seg" id="spanSeg"></div><span class="val" id="spanUnit">MHz</span></div>
       <div class="row"><span class="lbl">FFT</span><div class="seg" id="binsSeg"></div></div>
-      <div class="row"><label for="gainIn">Gain</label><input class="grow" id="gainIn" type="range" min="0" max="82" step="1"><span class="val wide" id="gainVal"></span></div>
+      <div class="row" id="gainRow"><label for="gainIn">Gain</label><input class="grow" id="gainIn" type="range" min="0" max="82" step="1"><span class="val wide" id="gainVal"></span></div>
       <div class="row"><span class="lbl">Detector</span>
         <div class="seg" id="detSeg"><button type="button" data-v="0">Mean</button><button type="button" data-v="1">Max</button></div></div>
-      <label class="check"><input type="checkbox" id="dcFix"> Remove DC per FFT on the chip</label>
+      <label class="check" id="dcRow"><input type="checkbox" id="dcFix"> Remove DC per FFT on the chip</label>
     </section>
 
     <section class="sect">
@@ -388,7 +386,18 @@ input[type=number].short { width: 64px; flex: 0 0 64px; }
 <script>
 "use strict";
 // ---------------------------------------------------------------- constants (match the SDR++ ESP-SDR module)
-const FMIN = 2204e6, FMAX = 2804e6;
+// Device profiles. The page started as the ESP-SDR front end (ESP32-S3 Wi-Fi chip, 2204-2804 MHz,
+// 16/40/80 MHz spectra); the Ionos SDR (EFR32FG23 radio board + ESP32-S3 carrier, docs:
+// ionos-sdr/ionos-sdr docs/ionos-usb-protocol.md) is a 430-440 MHz I/Q receiver with 50 ksps and a
+// wideband RSSI scan. Everything band-specific reads the active profile.
+const DEV_ESP = { id: "espsdr", name: "ESP32-S3", fmin: 2204e6, fmax: 2804e6, spanUnit: "MHz", spanDiv: 1e6,
+  spans: [[16e6, "16"], [40e6, "40"], [80e6, "80"]], steps: [[1e5, "0.1"], [1e6, "1"], [5e6, "5"], [20e6, "20"]], stepUnit: "MHz",
+  gain: true, dcFix: true, defFreq: 2437e6, defSpan: 80e6 };
+const DEV_IONOS = { id: "ionos", name: "Ionos SDR", fmin: 430e6, fmax: 440.025e6, spanUnit: "kHz", spanDiv: 1e3,
+  spans: [[50e3, "50"], [200e3, "200"], [1e6, "1000"], [2e6, "2000"], [5e6, "5000"], [10e6, "10000"]], steps: [[1e3, "1"], [1e4, "10"], [1e5, "100"], [1e6, "1000"]], stepUnit: "kHz",
+  gain: false, dcFix: false, defFreq: 433.775e6, defSpan: 50e3 };
+let DEV = DEV_ESP;
+let FMIN = DEV.fmin, FMAX = DEV.fmax;
 const SPEC_FALLBACK = [[16e6,6,256,2,1],[16e6,6,1024,2,4],[16e6,6,2048,3,7],[40e6,1,256,5,3],[40e6,1,1024,5,9],
                        [40e6,1,2048,7,17],[80e6,0,256,10,5],[80e6,0,1024,14,16],[80e6,0,2048,14,30]];
 const GAIN_IDX = [0, 10, 20, 40, 50, 60, 70, 82], GAIN_DB = [0, 10.3, 21.1, 30.2, 41.9, 51.3, 61.3, 73.3];
@@ -694,6 +703,240 @@ class SerialSource {
   }
 }
 
+
+// ---------------------------------------------------------------- Ionos SDR source (ionos-sdr-mini, USB host protocol)
+// Device -> host: fixed 1040-byte blocks with a 16-byte header: magic, u32 seq, u16 nsamp, u16 decim, u32 fs_in_hz.
+//   IQB2: 256 int16 I/Q pairs; rate = (fs_in_hz & 0xFFFFF) / decim; RSSI dBm in the upper 12 bits of fs_in_hz.
+//   SPC1: scan line: u32 span_hz, i16 floor_dbm, u16 range_db, nbin x u8 (dB = floor + v*range/255); f_center in fs_in_hz.
+//   MSG1: text (nsamp bytes), decim = type: 0 response, 1 hello (key=value), 2 status, 3 error.
+// Host -> device: text lines. FH<Hz> tunes, R<sps> picks the decimation, W<kHz>,<kHz>,<nbin> starts the scan, W0 ends it.
+const IONOS_BLK = 1040, IONOS_HDR = 16;
+const IONOS_MAGIC = { IQB2: 0x32425149, SPC1: 0x31435053, MSG1: 0x3147534D };
+function ionosSniff(b, n) {   // does this byte stream carry Ionos blocks? (IQB2 or MSG1 magic, 4-byte aligned search)
+  for (let i = 0; i + 3 < n; i++) {
+    if (b[i] === 0x49 && b[i + 1] === 0x51 && b[i + 2] === 0x42 && b[i + 3] === 0x32) return true;
+    if (b[i] === 0x4D && b[i + 1] === 0x53 && b[i + 2] === 0x47 && b[i + 3] === 0x31) return true;
+  }
+  return false;
+}
+
+// Radix-2 complex FFT (in place, separate re/im), Nuttall window, power in dBFS (int16 full scale = 0 dBFS)
+class IqFft {
+  constructor(n) {
+    this.n = n; this.re = new Float32Array(n); this.im = new Float32Array(n); this.db = new Float32Array(n);
+    this.win = new Float32Array(n); let wsum = 0;
+    for (let i = 0; i < n; i++) { const x = 2 * Math.PI * i / (n - 1); const w = 0.355768 - 0.487396 * Math.cos(x) + 0.144232 * Math.cos(2 * x) - 0.012604 * Math.cos(3 * x); this.win[i] = w; wsum += w; }
+    this.norm = 1 / (wsum * 32768);   // coherent gain x full scale -> a full-scale tone reads 0 dBFS
+    this.rev = new Uint32Array(n); let bits = 0; while ((1 << bits) < n) bits++;
+    for (let i = 0; i < n; i++) { let r = 0; for (let b = 0; b < bits; b++) r |= ((i >> b) & 1) << (bits - 1 - b); this.rev[i] = r; }
+    this.cos = new Float32Array(n / 2); this.sin = new Float32Array(n / 2);
+    for (let i = 0; i < n / 2; i++) { this.cos[i] = Math.cos(2 * Math.PI * i / n); this.sin[i] = -Math.sin(2 * Math.PI * i / n); }
+  }
+  // samples: Int16Array of interleaved I,Q (length >= 2n starting at off). Returns db (fftshifted, DC in the middle).
+  run(samples, off, invert) {
+    const n = this.n, re = this.re, im = this.im, rev = this.rev, win = this.win;
+    for (let i = 0; i < n; i++) { const j = rev[i]; re[j] = samples[off + 2 * i] * win[i]; im[j] = samples[off + 2 * i + 1] * win[i]; }
+    for (let size = 2; size <= n; size <<= 1) {
+      const half = size >> 1, step = n / size;
+      for (let i = 0; i < n; i += size) {
+        for (let j = 0, k = 0; j < half; j++, k += step) {
+          const c = this.cos[k], s = this.sin[k], a = i + j, b = a + half;
+          const tr = re[b] * c - im[b] * s, ti = re[b] * s + im[b] * c;
+          re[b] = re[a] - tr; im[b] = im[a] - ti; re[a] += tr; im[a] += ti;
+        }
+      }
+    }
+    const db = this.db, norm = this.norm, h = n / 2;
+    for (let i = 0; i < n; i++) {
+      const k = invert ? (h - i + n) % n : (i + h) % n;        // fftshift (+ optional spectral inversion)
+      const p = (re[k] * re[k] + im[k] * im[k]) * norm * norm;
+      db[i] = p > 1e-30 ? 10 * Math.log10(p) : -300;
+    }
+    return db;
+  }
+}
+
+class IonosSource {
+  constructor(hooks) {
+    this.h = hooks; this.port = null; this.reader = null; this.writer = null;
+    this.buf = new ByteBuf(); this.open = false; this.streaming = false; this.busy = false; this.paused = false;
+    this.want = null; this.cur = null; this.dirty = false; this.lastApply = 0;
+    this.stats = { frames: 0, lost: 0, crc: 0, bytes: 0, restarts: 0 };
+    this.hello = {}; this.fwInfo = "Ionos (no hello yet)"; this.fsIn = 400000; this.decim = 8; this.rssi = null;
+    this.nextSeq = -1; this.waiters = []; this.pendingCmd = null;
+    this.dec = new TextDecoder("utf-8"); this.enc = new TextEncoder();
+    this.iq = new Int16Array(4096 * 2); this.iqN = 0; this.fft = null; this.scanMode = false; this.invert = false;
+    this.profiles = [];
+  }
+  static supported() { return "serial" in navigator; }
+  get device() { return DEV_IONOS; }
+
+  async connect(anyPort, existingPort) {
+    this.port = existingPort || await navigator.serial.requestPort(anyPort ? {} : { filters: [{ usbVendorId: 0x303a }] });
+    await this.port.open({ baudRate: 2000000, bufferSize: 1 << 20 });
+    try { await this.port.setSignals({ dataTerminalReady: true, requestToSend: false }); } catch (e) {}
+    this.open = true;
+    this.writer = this.port.writable.getWriter();
+    this.readDone = this.readLoop();
+    // the firmware sends a hello block when the host connects; ask for it if it was missed
+    const t0 = performance.now();
+    while (!this.hello.ionos && performance.now() - t0 < 1500 && this.open) await this.waitData(100);
+    if (!this.hello.ionos) { await this.write("CAP?\n"); const t1 = performance.now(); while (!this.hello.ionos && performance.now() - t1 < 1500 && this.open) await this.waitData(100); }
+    if (!this.hello.ionos) { const port = this.port; await this.close(); const e = new Error("No Ionos firmware answered on this port."); e.port = port; throw e; }
+    const hz = Number(this.hello.fs_in_hz); if (hz > 0) this.fsIn = hz;
+    const fmin = Number(this.hello.freq_min_hz), fmax = Number(this.hello.freq_max_hz);
+    if (fmin > 0 && fmax > fmin) { DEV_IONOS.fmin = fmin; DEV_IONOS.fmax = fmax; }
+    this.fwInfo = "Ionos " + (this.hello.fw_esp || "?") + " / FG23 " + (this.hello.fw_fg23 || "?") + " / " + (this.hello.board || "?");
+    this.h.onInfo(this);
+    this.loop();
+  }
+
+  async readLoop() {
+    while (this.open && this.port.readable) {
+      this.reader = this.port.readable.getReader();
+      try {
+        for (;;) { const { value, done } = await this.reader.read(); if (done) break; if (value && value.length) this.onBytes(value); }
+      } catch (e) { if (this.open) this.h.log("read error: " + e.message); }
+      finally { try { this.reader.releaseLock(); } catch (e) {} }
+      if (!this.open) break;
+      await sleep(50);
+      if (!this.port.readable) break;
+    }
+    if (this.open) { this.open = false; this.h.onStatus("err", "Board disconnected"); }
+  }
+
+  onBytes(v) {
+    this.stats.bytes += v.length;
+    this.buf.push(v);
+    const b = this.buf.b; let pos = 0; const n = this.buf.n;
+    while (n - pos >= IONOS_BLK) {
+      const magic = (b[pos] | (b[pos + 1] << 8) | (b[pos + 2] << 16) | (b[pos + 3] << 24)) >>> 0;
+      if (magic !== IONOS_MAGIC.IQB2 && magic !== IONOS_MAGIC.SPC1 && magic !== IONOS_MAGIC.MSG1) { pos += 4; this.stats.crc++; continue; }   // resync (counted as framing errors)
+      const seq = (b[pos + 4] | (b[pos + 5] << 8) | (b[pos + 6] << 16) | (b[pos + 7] << 24)) >>> 0;
+      const nsamp = b[pos + 8] | (b[pos + 9] << 8), decim = b[pos + 10] | (b[pos + 11] << 8);
+      const fs = (b[pos + 12] | (b[pos + 13] << 8) | (b[pos + 14] << 16) | (b[pos + 15] << 24)) >>> 0;
+      const body = pos + IONOS_HDR;
+      if (magic === IONOS_MAGIC.IQB2) this.onIq(b, body, seq, nsamp, decim, fs);
+      else if (magic === IONOS_MAGIC.SPC1) this.onScan(b, body, seq, nsamp, decim, fs);
+      else this.onMsg(this.dec.decode(b.subarray(body, body + Math.min(nsamp, IONOS_BLK - IONOS_HDR))), decim);
+      pos += IONOS_BLK;
+    }
+    this.buf.drop(pos);
+    this.wake();
+  }
+  wake() { const w = this.waiters; this.waiters = []; for (const r of w) r(); }
+  waitData(ms) { return new Promise((res) => { const t = setTimeout(res, ms); this.waiters.push(() => { clearTimeout(t); res(); }); }); }
+  async write(s) { if (this.writer) await this.writer.write(this.enc.encode(s)); }
+
+  onMsg(text, type) {
+    if (type === 1) {           // hello: key=value lines
+      const h = {}; for (const ln of text.split("\n")) { const i = ln.indexOf("="); if (i > 0) h[ln.slice(0, i).trim()] = ln.slice(i + 1).trim(); }
+      this.hello = h; this.h.log("ionos hello: " + (h.product || "?") + " " + (h.board || "") + " fw " + (h.fw_esp || "?"));
+    } else if (type === 0) {
+      this.h.log("< " + text.trim().replace(/\n/g, " | ").slice(0, 160));
+      if (this.pendingCmd) { const p = this.pendingCmd; this.pendingCmd = null; p(text); }
+    } else if (type === 2) {
+      const m = /lost=(\d+)/.exec(text); if (m) this.devLost = Number(m[1]);
+    } else this.h.log("ionos: " + text.trim());
+  }
+  // Send a line and wait for the MSG1 response (OK.../ERR...); null on ERR or timeout
+  async command(c, timeoutMs) {
+    this.h.log("> " + c);
+    const p = new Promise((res) => { this.pendingCmd = res; setTimeout(() => { if (this.pendingCmd === res) { this.pendingCmd = null; res(null); } }, timeoutMs); });
+    await this.write(c + "\n");
+    const r = await p;
+    if (r == null) { this.h.log("< (no reply)"); return null; }
+    return r.startsWith("ERR") ? null : r;
+  }
+
+  onIq(b, off, seq, nsamp, decim, fs) {
+    if (this.nextSeq >= 0 && seq !== this.nextSeq) this.stats.lost += (seq - this.nextSeq) >>> 0;
+    this.nextSeq = (seq + 1) >>> 0;
+    this.decim = decim || this.decim; this.fsIn = (fs & 0xFFFFF) || this.fsIn;
+    let r = (fs >>> 20) & 0xFFF; if (r & 0x800) r -= 0x1000; this.rssi = r;
+    if (!this.streaming || this.scanMode || !this.cur) return;
+    const sps = this.fsIn / this.decim, n = this.cur.bins;
+    if (!this.fft || this.fft.n !== n) { this.fft = new IqFft(n); this.iqN = 0; }
+    // append the block (int16 LE pairs) to the sample ring
+    const need = 2 * nsamp;
+    if (this.iqN + need > this.iq.length) this.iqN = 0;
+    for (let i = 0; i < need; i++) { let v = b[off + 2 * i] | (b[off + 2 * i + 1] << 8); if (v & 0x8000) v -= 0x10000; this.iq[this.iqN + i] = v; }
+    this.iqN += need;
+    while (this.iqN >= 2 * n) {
+      const db = this.fft.run(this.iq, 0, this.invert);
+      this.iq.copyWithin(0, 2 * n, this.iqN); this.iqN -= 2 * n;
+      this.stats.frames++;
+      this.h.onSpectrum(Float32Array.from(db), n, sps, this.cur.freqHz);
+    }
+  }
+
+  onScan(b, off, seq, nbin, flags, fCenter) {
+    if (!this.streaming || !this.scanMode || !this.cur) return;
+    const span = (b[off] | (b[off + 1] << 8) | (b[off + 2] << 16) | (b[off + 3] << 24)) >>> 0;
+    let floor = b[off + 4] | (b[off + 5] << 8); if (floor & 0x8000) floor -= 0x10000;
+    const range = b[off + 6] | (b[off + 7] << 8);
+    if (!nbin || nbin > 1016 || !span) return;
+    const db = new Float32Array(nbin);
+    for (let j = 0; j < nbin; j++) db[j] = floor + b[off + 8 + j] * range / 255;
+    this.stats.frames++;
+    this.h.onSpectrum(db, nbin, span, fCenter || this.cur.freqHz);
+  }
+
+  // UI contract (same as SerialSource)
+  dbUnit() { return this.scanMode ? "dBm" : "dBFS"; }
+  binsFor(span) { return span <= 100e3 ? [256, 512, 1024, 2048] : [256, 512, 1016]; }
+  update(s) { this.want = { ...s }; this.dirty = true; }
+  async pause() { this.paused = true; while (this.busy) await sleep(20); if (this.streaming) { this.busy = true; await this.stopStream(); this.busy = false; } this.h.onStatus("idle", "Stopped"); }
+  resume() { this.paused = false; this.dirty = true; }
+  async loop() {
+    while (this.open) {
+      const now = performance.now();
+      if (this.dirty && !this.paused && !this.busy && (!this.streaming || now - this.lastApply >= 350)) {
+        this.busy = true; this.dirty = false;
+        try { await this.startStream(this.want); } catch (e) { this.h.log("error: " + e.message); }
+        this.lastApply = performance.now(); this.busy = false;
+      }
+      await sleep(25);
+    }
+  }
+  async startStream(s) {
+    const fHz = Math.round(s.freqHz * (1 - (s.ppm || 0) * 1e-6));
+    const fk = Math.round(fHz / 1e3);
+    const scan = s.span > 100e3;
+    const prev = this.cur; this.cur = { ...s, freqHz: fk * 1e3 };
+    if (scan) {
+      const nbin = Math.min(1016, s.bins);
+      await this.command("W" + fk + "," + Math.round(s.span / 1e3) + "," + nbin, 1500);
+      this.scanMode = true;
+    } else {
+      if (this.scanMode) { await this.command("W0", 2500); this.scanMode = false; }
+      if (!prev || prev.freqHz !== this.cur.freqHz || prev.scan) await this.command("FH" + fHz, 1500);
+      const wantSps = Math.min(s.span, this.fsIn / 8);
+      if (!prev || prev.span !== s.span) await this.command("R" + Math.round(wantSps), 1500);
+      this.iqN = 0;
+    }
+    this.cur.scan = scan;
+    this.streaming = true;
+    this.h.onStatus("live", "Live");
+    $("tuneInfo").textContent = scan ? ("Scan " + (s.span / 1e6) + " MHz, " + Math.min(1016, s.bins) + " bins (FG23 RSSI sweep)")
+      : ("I/Q " + (this.fsIn / this.decim / 1e3).toFixed(1) + " ksps, " + s.bins + "-point FFT" + (this.rssi != null ? " · RSSI " + this.rssi + " dBm" : ""));
+  }
+  async stopStream() {
+    this.streaming = false;
+    if (this.scanMode) { await this.command("W0", 2500); this.scanMode = false; }
+  }
+  async close() {
+    if (!this.port) return;
+    try { if (this.open && this.streaming) await this.stopStream(); } catch (e) {}
+    this.open = false;
+    try { if (this.reader) await this.reader.cancel(); } catch (e) {}
+    try { await this.readDone; } catch (e) {}
+    try { this.writer.releaseLock(); } catch (e) {}
+    try { await this.port.close(); } catch (e) {}
+    this.lastPort = this.port; this.port = null;
+  }
+}
+
 // ---------------------------------------------------------------- demo source: a plausible 2.2-2.8 GHz scene
 class DemoSource {
   constructor(hooks) {
@@ -765,6 +1008,8 @@ const WF_ALL = 310;   // waterfall rate slider end stop: one row per spectrum, l
 const state = { ...DEFAULTS };
 try { Object.assign(state, JSON.parse(localStorage.getItem("z2-web-sdr") || localStorage.getItem("sdrpp-esp-web") || "{}")); } catch (e) {}
 function save() { try { localStorage.setItem("z2-web-sdr", JSON.stringify(state)); } catch (e) {} }
+// level unit of the current source: dBFS for the on-chip FFTs, dBm for the FG23 RSSI sweep (absolute, calibrated)
+const dbUnit = () => (source && source.dbUnit) ? source.dbUnit() : "dBFS";
 const srcSettings = () => ({ freqHz: state.freqHz, span: state.span, bins: state.bins, gain: state.gain, maxHold: state.maxHold, dcFix: state.dcFix, ppm: state.ppm });
 
 let source = null, mode = "demo";
@@ -1059,7 +1304,7 @@ function drawSpectrum(v) {
     sctx.fillStyle = "rgba(7,10,12,0.75)"; sctx.fillRect(4 * dpr, y - 7 * dpr, tw + 6 * dpr, 14 * dpr);
     sctx.fillStyle = "#7c8f99"; sctx.fillText(t, 7 * dpr, y);
   }
-  sctx.fillStyle = "#4b5c66"; sctx.fillText("dBFS", 7 * dpr, 10 * dpr);
+  sctx.fillStyle = "#4b5c66"; sctx.fillText(dbUnit(), 7 * dpr, 10 * dpr);
   // marker
   if (marker != null && marker >= v.a && marker <= v.b) {
     const x = Math.round((marker - v.a) / span * W) + 0.5;
@@ -1193,7 +1438,7 @@ function renderDigits() {
 function setFreq(hz, why) {
   hz = Math.round(hz / 1e3) * 1e3;
   if (hz < FMIN || hz > FMAX) {
-    if (why !== "drag" && why !== "wheel") toast("The ESP32-S3 tunes " + FMIN / 1e6 + "–" + FMAX / 1e6 + " MHz. Moved to " + ((hz < FMIN ? FMIN : FMAX) / 1e6).toFixed(0) + " MHz.");
+    if (why !== "drag" && why !== "wheel") toast("The " + DEV.name + " tunes " + FMIN / 1e6 + "–" + FMAX / 1e6 + " MHz. Moved to " + ((hz < FMIN ? FMIN : FMAX) / 1e6).toFixed(0) + " MHz.");
     hz = Math.max(FMIN, Math.min(FMAX, hz));
   }
   if (hz === state.freqHz) return;
@@ -1213,6 +1458,37 @@ function segInit(id, key, parse, onChange) {
 }
 function pushSettings() { if (source) source.update(srcSettings()); }
 function resetTraces() { data.n = 0; data.avg = null; data.peak = null; viewDirty = true; resetAutoRange(); }
+function buildSeg(id, items) {
+  const seg = $(id); seg.innerHTML = "";
+  for (const [v, label] of items) { const bt = document.createElement("button"); bt.type = "button"; bt.dataset.v = v; bt.textContent = label; seg.appendChild(bt); }
+}
+function buildSpans() {
+  buildSeg("spanSeg", DEV.spans); $("spanUnit").textContent = DEV.spanUnit;
+  if (!DEV.spans.some((x) => x[0] === state.span)) state.span = DEV.defSpan;
+  syncSpan();
+}
+function buildSteps() {
+  buildSeg("stepSeg", DEV.steps); $("stepUnit").textContent = DEV.stepUnit;
+  if (!DEV.steps.some((x) => x[0] === state.step)) state.step = DEV.steps[1][0];
+  syncStep();
+}
+// Switch the band-specific parts of the page to a device profile. The waterfall history is cleared:
+// its rows are stored relative to FMIN.
+function applyDevice(dev) {
+  if (DEV !== dev) {
+    state.byDev = state.byDev || {};
+    state.byDev[DEV.id] = { freqHz: state.freqHz, span: state.span, bins: state.bins, step: state.step };
+    DEV = dev; FMIN = dev.fmin; FMAX = dev.fmax;
+    const m = state.byDev[dev.id] || {};
+    state.freqHz = m.freqHz || dev.defFreq; state.span = m.span || dev.defSpan; if (m.bins) state.bins = m.bins; if (m.step) state.step = m.step;
+    if (wgl) { wgl.rows = 0; wgl.alloc(Math.max(WH, 1024)); }
+    wfDirty = true;
+  }
+  state.freqHz = Math.max(FMIN, Math.min(FMAX, state.freqHz));
+  $("freqIn").min = (FMIN / 1e6).toFixed(3); $("freqIn").max = (FMAX / 1e6).toFixed(3);
+  $("gainRow").hidden = !dev.gain; $("dcRow").hidden = !dev.dcFix;
+  buildSpans(); buildSteps(); buildBins(); renderDigits(); resetTraces(); save();
+}
 const syncStep = segInit("stepSeg", "step", Number);
 const syncSpan = segInit("spanSeg", "span", Number, () => { buildBins(); pushSettings(); });
 const syncDet = segInit("detSeg", "maxHold", (v) => v === "1", () => { resetTraces(); pushSettings(); });
@@ -1223,7 +1499,8 @@ function buildBins() {
   const seg = $("binsSeg"); seg.innerHTML = "";
   for (const b of avail) { const bt = document.createElement("button"); bt.type = "button"; bt.dataset.v = b; bt.textContent = b; seg.appendChild(bt); }
   for (const b of seg.querySelectorAll("button")) b.classList.toggle("on", Number(b.dataset.v) === state.bins);
-  $("profileTag").textContent = (state.span / state.bins / 1e3).toFixed(1) + " kHz/bin";
+  const hzBin = state.span / state.bins;
+  $("profileTag").textContent = hzBin >= 1e3 ? (hzBin / 1e3).toFixed(1) + " kHz/bin" : hzBin.toFixed(1) + " Hz/bin";
 }
 $("binsSeg").addEventListener("click", (e) => {
   const b = e.target.closest("button"); if (!b) return;
@@ -1301,7 +1578,7 @@ function updateMarkerRead() {
   const el = $("markerRead");
   if (marker == null) { el.textContent = ""; return; }
   const l = markerLevel();
-  el.textContent = "Marker " + (marker / 1e6).toFixed(3) + " MHz" + (l != null ? "  " + l.toFixed(1) + " dBFS" : "");
+  el.textContent = "Marker " + (marker / 1e6).toFixed(3) + " MHz" + (l != null ? "  " + l.toFixed(1) + " " + dbUnit() : "");
 }
 // ---------------------------------------------------------------- pointer interaction
 function bindDigits() {
@@ -1588,8 +1865,30 @@ const hooks = {
   log,
   onInfo: (src) => { $("fwInfo").textContent = "Firmware " + src.fwInfo; }
 };
+// Read the port for a moment: an Ionos board streams 1040-byte blocks (IQB2) and sends a MSG1 hello
+// on connect, an ESP-SDR board is silent or sends text/SPC1. Decided BEFORE any ESP-SDR probe, so the
+// firmware installer is never offered for an Ionos carrier.
+async function sniffPort(port) {
+  let ionos = false;
+  try {
+    await port.open({ baudRate: 2000000, bufferSize: 1 << 18 });
+    try { await port.setSignals({ dataTerminalReady: true, requestToSend: false }); } catch (e) {}
+    const reader = port.readable.getReader(); const buf = new ByteBuf(); const end = performance.now() + 700;
+    try {
+      while (performance.now() < end && buf.n < 65536) {
+        const r = await Promise.race([reader.read(), sleep(Math.max(1, end - performance.now())).then(() => ({ timeout: true }))]);
+        if (!r || r.timeout || r.done) break;
+        if (r.value) buf.push(r.value);
+        if (ionosSniff(buf.b, buf.n)) { ionos = true; break; }
+      }
+    } finally { try { await reader.cancel(); } catch (e) {} try { reader.releaseLock(); } catch (e) {} }
+    await port.close();
+  } catch (e) { try { await port.close(); } catch (e2) {} throw e; }
+  return ionos;
+}
 function startDemo() {
   if (source && source.stop) source.stop();
+  applyDevice(DEV_ESP);
   source = new DemoSource(hooks); mode = "demo";
   resetTraces(); buildBins(); source.start(srcSettings());
   setStatus("demo", state.playing ? "Demo" : "Stopped"); $("demoNote").hidden = false; $("fwInfo").textContent = source.fwInfo;
@@ -1603,11 +1902,15 @@ async function connect(anyPort, existingPort, quiet) {
   }
   if (connecting || flashing) return;
   const prev = source;
-  const s = new SerialSource(hooks);
+  let s = null;
   setStatus("busy", "Connecting");
   connecting = true; updateFwUi(); $("connectBtn").disabled = true; rackTouched();
   try {
-    await s.connect(anyPort, existingPort);
+    const port = existingPort || await navigator.serial.requestPort(anyPort ? {} : { filters: [{ usbVendorId: 0x303a }] });
+    const ionos = await sniffPort(port);
+    s = ionos ? new IonosSource(hooks) : new SerialSource(hooks);
+    if (ionos) log("Ionos SDR board detected");
+    await s.connect(anyPort, port);
     connecting = false; $("connectBtn").disabled = false; updateFwUi(); rackTouched();
     checkPortKind(s.port);
   } catch (e) {
@@ -1627,8 +1930,10 @@ async function connect(anyPort, existingPort, quiet) {
   }
   if (prev && prev.stop) prev.stop();
   source = s; mode = "serial"; boardPort = s.port;
-  fwState.needs = s.fwInfo.startsWith("old") || (!!s.fwBuild && !!fwState.bundle && s.fwBuild < (fwState.bundle.build_timestamp || ""));
+  const isIonos = s instanceof IonosSource;
+  fwState.needs = !isIonos && (s.fwInfo.startsWith("old") || (!!s.fwBuild && !!fwState.bundle && s.fwBuild < (fwState.bundle.build_timestamp || "")));
   updateFwUi();
+  applyDevice(isIonos ? DEV_IONOS : DEV_ESP);
   resetTraces(); buildBins();
   $("demoNote").hidden = true; $("demoBtn").disabled = false; $("demoBtn").textContent = "Back to demo";
   $("connectLabel").textContent = "Disconnect"; document.querySelector("#connectBtn .wide-only").hidden = true;
@@ -1653,7 +1958,9 @@ const UART_VIDS = [0x303a, 0x1a86, 0x10c4, 0x0403, 0x067b];
 function fwLabel() { const v = customBundle ? customBundle.version : fwState.bundle; return v ? (v.build_date || "") : ""; }
 function updateFwUi() {
   const b = $("flashBtn");
-  if (!fwState.bundle && !customBundle) { $("fwBox").hidden = true; return; }
+  // Never offer the ESP-SDR firmware on an Ionos carrier: its ESP32-S3 runs the ionos-sdr firmware.
+  if ((!fwState.bundle && !customBundle) || (mode === "serial" && source instanceof IonosSource)) { $("fwBox").hidden = true; return; }
+  $("fwBox").hidden = false;
   const v = fwState.bundle;
   $("fwBundleInfo").textContent = customBundle ? "Selected build: " + (customBundle.version.build_date || "custom") + " " + (customBundle.version.revision || "").slice(0, 7) + " (" + customBundle.images.length + " images)"
     : "Bundled firmware " + v.build_date + " · " + (v.revision || "").slice(0, 7);
@@ -1714,7 +2021,7 @@ $("fwPick").addEventListener("change", async () => {
 });
 
 // ---------------------------------------------------------------- boot
-buildDigits(); renderDigits(); initControls(); buildBins(); bindDigits();
+buildDigits(); renderDigits(); initControls(); buildSpans(); buildSteps(); buildBins(); bindDigits();
 bindPlot(specCv, true); bindPlot(wfCv, false); bindDivider();
 new ResizeObserver(resize).observe($("view"));
 resize();
@@ -1722,7 +2029,7 @@ if (!SerialSource.supported()) $("srcNote").innerHTML = "This browser has no USB
 updateFwUi(); setPlayUi(); syncWakeLock(); initRackAutoHide();
 if (state.freqHz < FMIN || state.freqHz > FMAX) {
   const old = state.freqHz; state.freqHz = Math.max(FMIN, Math.min(FMAX, state.freqHz)); renderDigits(); save();
-  toast("The saved frequency " + (old / 1e6).toFixed(3) + " MHz is outside the ESP32-S3's range. Moved to " + (state.freqHz / 1e6).toFixed(0) + " MHz.");
+  toast("The saved frequency " + (old / 1e6).toFixed(3) + " MHz is outside the " + DEV.name + "'s range. Moved to " + (state.freqHz / 1e6).toFixed(0) + " MHz.");
 }
 startDemo();
 requestAnimationFrame(tick);
