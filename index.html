@@ -915,6 +915,7 @@ class IonosSource {
       if (!prev || prev.span !== s.span) await this.command("R" + Math.round(wantSps), 1500);
       this.iqN = 0;
     }
+    if (!prev || prev.scan !== scan) { this.nextSeq = -1; if (this.h.onReset) this.h.onReset(); }   // I/Q <-> scan: drop the stale trace
     this.cur.scan = scan;
     this.streaming = true;
     this.h.onStatus("live", "Live");
@@ -2146,7 +2147,8 @@ const hooks = {
   onSpectrum,
   onStatus: (k, t) => { setStatus(k, t); if (k === "err" && mode === "serial") { mode = "none"; $("connectLabel").textContent = "Connect"; } },
   log,
-  onInfo: (src) => { $("fwInfo").textContent = "Firmware " + src.fwInfo; }
+  onInfo: (src) => { $("fwInfo").textContent = "Firmware " + src.fwInfo; },
+  onReset: () => resetTraces()
 };
 // Read the port for a moment: an Ionos board streams 1040-byte blocks (IQB2) and sends a MSG1 hello
 // on connect, an ESP-SDR board is silent or sends text/SPC1. Decided BEFORE any ESP-SDR probe, so the
