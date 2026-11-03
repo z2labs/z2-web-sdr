@@ -62,7 +62,9 @@
     getInfo: () => ({ usbVendorId: 0x303a, usbProductId: 0x1001 }),
     async open() {
       st.opens++;
-      this.readable = new ReadableStream({ start(c) { ctrl = c; } });
+      // like a real port: cancelling the reader discards the stream and port.readable is a fresh one
+      const self = this, mk = () => new ReadableStream({ start(c) { ctrl = c; }, cancel() { self.readable = mk(); } });
+      this.readable = mk();
       this.writable = new WritableStream({ write(chunk) {
         for (const ch of dec.decode(chunk)) { if (ch === "\n" || ch === "\r") { const l = line; line = ""; if (l.trim()) onLine(l); } else line += ch; }
       } });

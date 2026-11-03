@@ -771,10 +771,14 @@ class IonosSource {
   static supported() { return "serial" in navigator; }
   get device() { return DEV_IONOS; }
 
-  async connect(anyPort, existingPort) {
+  // alreadyOpen: sniffPort() leaves an Ionos port open and hands it over - the ESP32-S3's USB
+  // serial/JTAG bridge does not always resume after a close/open cycle.
+  async connect(anyPort, existingPort, alreadyOpen) {
     this.port = existingPort || await navigator.serial.requestPort(anyPort ? {} : { filters: [{ usbVendorId: 0x303a }] });
-    await this.port.open({ baudRate: 2000000, bufferSize: 1 << 20 });
-    try { await this.port.setSignals({ dataTerminalReady: true, requestToSend: false }); } catch (e) {}
+    if (!alreadyOpen) {
+      await this.port.open({ baudRate: 2000000, bufferSize: 1 << 20 });
+      try { await this.port.setSignals({ dataTerminalReady: true, requestToSend: false }); } catch (e) {}
+    }
     this.open = true;
     this.writer = this.port.writable.getWriter();
     this.readDone = this.readLoop();
@@ -1870,10 +1874,12 @@ const hooks = {
 // Read the port for a moment: an Ionos board streams 1040-byte blocks (IQB2) and sends a MSG1 hello
 // on connect, an ESP-SDR board is silent or sends text/SPC1. Decided BEFORE any ESP-SDR probe, so the
 // firmware installer is never offered for an Ionos carrier.
+// An Ionos port is left OPEN (reader released) and handed to IonosSource; an ESP-SDR port is closed
+// again and reopened by SerialSource as before.
 async function sniffPort(port) {
   let ionos = false;
   try {
-    await port.open({ baudRate: 2000000, bufferSize: 1 << 18 });
+    await port.open({ baudRate: 2000000, bufferSize: 1 << 20 });
     try { await port.setSignals({ dataTerminalReady: true, requestToSend: false }); } catch (e) {}
     const reader = port.readable.getReader(); const buf = new ByteBuf(); const end = performance.now() + 700;
     try {
@@ -1884,7 +1890,7 @@ async function sniffPort(port) {
         if (ionosSniff(buf.b, buf.n)) { ionos = true; break; }
       }
     } finally { try { await reader.cancel(); } catch (e) {} try { reader.releaseLock(); } catch (e) {} }
-    await port.close();
+    if (!ionos) await port.close();
   } catch (e) { try { await port.close(); } catch (e2) {} throw e; }
   return ionos;
 }
@@ -1912,7 +1918,7 @@ async function connect(anyPort, existingPort, quiet) {
     const ionos = await sniffPort(port);
     s = ionos ? new IonosSource(hooks) : new SerialSource(hooks);
     if (ionos) log("Ionos SDR board detected");
-    await s.connect(anyPort, port);
+    await s.connect(anyPort, port, ionos);
     connecting = false; $("connectBtn").disabled = false; updateFwUi(); rackTouched();
     checkPortKind(s.port);
   } catch (e) {
