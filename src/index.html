@@ -1880,6 +1880,8 @@ async function sniffPort(port) {
   let ionos = false;
   try {
     await port.open({ baudRate: 2000000, bufferSize: 1 << 20 });
+    // RTS stays low for the whole session: the ESP32-S3's USB-Serial/JTAG resets the chip when
+    // RTS is asserted while DTR is low (esptool auto-reset emulation, cannot be disabled on the S3).
     try { await port.setSignals({ dataTerminalReady: true, requestToSend: false }); } catch (e) {}
     const reader = port.readable.getReader(); const buf = new ByteBuf(); const end = performance.now() + 700;
     try {
