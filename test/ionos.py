@@ -25,6 +25,13 @@ async def main():
         await pg.click("#peakFind"); await pg.wait_for_timeout(200)
         marker = await pg.inner_text("#markerRead"); print("marker:", marker)
         ok = chip == "LIVE" and "Ionos" in fw and tune.startswith("I/Q 50.0 ksps") and "433.785" in marker
+        # 200 ksps I/Q (R = 2, firmware with decim_list starting at 2)
+        await pg.click("#spanSeg button[data-v='200000']")
+        await pg.wait_for_timeout(2500)
+        tune200 = await pg.inner_text("#tuneInfo"); print("tune:", tune200)
+        await pg.click("#peakFind"); await pg.wait_for_timeout(200)
+        marker200 = await pg.inner_text("#markerRead"); print("marker:", marker200)
+        ok = ok and tune200.startswith("I/Q 200.0 ksps") and "433.785" in marker200
         # 1 MHz scan
         await pg.click("#spanSeg button[data-v='1000000']")
         await pg.wait_for_timeout(2500)

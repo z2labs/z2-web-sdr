@@ -394,7 +394,7 @@ const DEV_ESP = { id: "espsdr", name: "ESP32-S3", fmin: 2204e6, fmax: 2804e6, sp
   spans: [[16e6, "16"], [40e6, "40"], [80e6, "80"]], steps: [[1e5, "0.1"], [1e6, "1"], [5e6, "5"], [20e6, "20"]], stepUnit: "MHz",
   gain: true, dcFix: true, defFreq: 2437e6, defSpan: 80e6 };
 const DEV_IONOS = { id: "ionos", name: "Ionos SDR", fmin: 430e6, fmax: 440.025e6, spanUnit: "", spanDiv: 1e3,
-  spans: [[50e3, "50k"], [200e3, "200k"], [1e6, "1M"], [5e6, "5M"], [10e6, "10M"]], steps: [[1e3, "1k"], [1e4, "10k"], [1e5, "100k"], [1e6, "1M"]], stepUnit: "",
+  spans: [[50e3, "50k"], [100e3, "100k"], [200e3, "200k"], [1e6, "1M"], [5e6, "5M"], [10e6, "10M"]], steps: [[1e3, "1k"], [1e4, "10k"], [1e5, "100k"], [1e6, "1M"]], stepUnit: "",
   gain: false, dcFix: false, defFreq: 433.775e6, defSpan: 50e3 };
 let DEV = DEV_ESP;
 let FMIN = DEV.fmin, FMAX = DEV.fmax;
@@ -762,7 +762,7 @@ class IonosSource {
     this.buf = new ByteBuf(); this.open = false; this.streaming = false; this.busy = false; this.paused = false;
     this.want = null; this.cur = null; this.dirty = false; this.lastApply = 0;
     this.stats = { frames: 0, lost: 0, crc: 0, bytes: 0, restarts: 0 };
-    this.hello = {}; this.fwInfo = "Ionos (no hello yet)"; this.fsIn = 400000; this.decim = 8; this.rssi = null;
+    this.hello = {}; this.fwInfo = "Ionos (no hello yet)"; this.fsIn = 400000; this.decim = 8; this.minDecim = 8; this.rssi = null;
     this.nextSeq = -1; this.waiters = []; this.pendingCmd = null;
     this.dec = new TextDecoder("utf-8"); this.enc = new TextEncoder();
     this.iq = new Int16Array(4096 * 2); this.iqN = 0; this.fft = null; this.scanMode = false; this.invert = false;
@@ -788,6 +788,9 @@ class IonosSource {
     if (!this.hello.ionos) { await this.write("CAP?\n"); const t1 = performance.now(); while (!this.hello.ionos && performance.now() - t1 < 1500 && this.open) await this.waitData(100); }
     if (!this.hello.ionos) { const port = this.port; await this.close(); const e = new Error("No Ionos firmware answered on this port."); e.port = port; throw e; }
     const hz = Number(this.hello.fs_in_hz); if (hz > 0) this.fsIn = hz;
+    // smallest total decimation the firmware offers: 8 (50 ksps) on older firmware, 2 (200 ksps) since 2026-11
+    const dl = String(this.hello.decim_list || "8").split(",").map(Number).filter(x => x > 0);
+    this.minDecim = dl.length ? Math.min(...dl) : 8;
     const fmin = Number(this.hello.freq_min_hz), fmax = Number(this.hello.freq_max_hz);
     if (fmin > 0 && fmax > fmin) { DEV_IONOS.fmin = fmin; DEV_IONOS.fmax = fmax; }
     this.fwInfo = "Ionos " + (this.hello.fw_esp || "?") + " / FG23 " + (this.hello.fw_fg23 || "?") + " / " + (this.hello.board || "?");
@@ -888,7 +891,9 @@ class IonosSource {
 
   // UI contract (same as SerialSource)
   dbUnit() { return this.scanMode ? "dBm" : "dBFS"; }
-  binsFor(span) { return span <= 100e3 ? [256, 512, 1024, 2048] : [256, 512, 1016]; }
+  // I/Q (browser FFT) up to the fastest rate the board offers, the FG23 RSSI scan above it
+  isScan(span) { return span > this.fsIn / (this.minDecim || 8); }
+  binsFor(span) { return !this.isScan(span) ? [256, 512, 1024, 2048] : [256, 512, 1016]; }
   update(s) { this.want = { ...s }; this.dirty = true; }
   async pause() { this.paused = true; while (this.busy) await sleep(20); if (this.streaming) { this.busy = true; await this.stopStream(); this.busy = false; } this.h.onStatus("idle", "Stopped"); }
   resume() { this.paused = false; this.dirty = true; }
@@ -906,7 +911,7 @@ class IonosSource {
   async startStream(s) {
     const fHz = Math.round(s.freqHz * (1 - (s.ppm || 0) * 1e-6));
     const fk = Math.round(fHz / 1e3);
-    const scan = s.span > 100e3;
+    const scan = this.isScan(s.span);
     const prev = this.cur; this.cur = { ...s, freqHz: fk * 1e3 };
     if (scan) {
       const nbin = Math.min(1016, s.bins);
@@ -915,8 +920,11 @@ class IonosSource {
     } else {
       if (this.scanMode) { await this.command("W0", 2500); this.scanMode = false; }
       if (!prev || prev.freqHz !== this.cur.freqHz || prev.scan) await this.command("FH" + fHz, 1500);
-      const wantSps = Math.min(s.span, this.fsIn / 8);
-      if (!prev || prev.span !== s.span) await this.command("R" + Math.round(wantSps), 1500);
+      const wantSps = Math.min(s.span, this.fsIn / (this.minDecim || 8));
+      if (!prev || prev.span !== s.span) {
+        const r = await this.command("R" + Math.round(wantSps), 1500);   // "OK\nfs=200000 decim=2"
+        const m = r && /decim=(\d+)/.exec(r); if (m) this.decim = Number(m[1]);
+      }
       this.iqN = 0;
     }
     if (!prev || prev.scan !== scan) { this.nextSeq = -1; if (this.h.onReset) this.h.onReset(); }   // I/Q <-> scan: drop the stale trace

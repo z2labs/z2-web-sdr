@@ -29,10 +29,10 @@ The page works from a local file (`file://`) or any https address. Settings are 
 
 The page also drives the **Ionos SDR** (`ionos-sdr-mini`: EFR32FG23 radio board on an ESP32-S3 carrier, 430–440 MHz). Plug its native USB port in and press **Connect board**: the page recognises the Ionos block stream before any ESP-SDR probe, switches the band, span and step controls to the Ionos profile (no gain slider, no firmware installer), and shows
 
-- **I/Q mode** (span 50 kHz): the 50 ksps int16 stream is FFT'd in the browser (256–2048 points, Nuttall window, dBFS), with the receiver's RSSI in the status line;
-- **scan mode** (span 200 kHz … 10 MHz): the FG23 RSSI sweep (`W` command, up to 1016 bins, absolute dBm).
+- **I/Q mode** (span 50 / 100 / 200 kHz): the int16 stream at 50, 100 or 200 ksps (`R` command; the fastest rate comes from the board's `decim_list`, older firmware stops at 50 ksps) is FFT'd in the browser (256–2048 points, Nuttall window, dBFS), with the receiver's RSSI in the status line;
+- **scan mode** (spans above the I/Q rate, 1 … 10 MHz): the FG23 RSSI sweep (`W` command, up to 1016 bins, absolute dBm).
 
-The port is opened once and handed over after detection, with DTR on and RTS off for the whole session: the ESP32-S3 resets when RTS is asserted while DTR is low, and that reset cannot be disabled on the S3.
+The port is opened once and handed over after detection, with DTR on and RTS off for the whole session: on firmware that uses the ESP32-S3 USB-Serial/JTAG, RTS asserted while DTR is low resets the chip. Current firmware (TinyUSB CDC on the USB-OTG peripheral) does not reset, but the page keeps the same rule.
 
 Protocol: `docs/ionos-usb-protocol.md` in [ionos-sdr/ionos-sdr](https://github.com/ionos-sdr/ionos-sdr) (1040-byte `IQB2` / `SPC1` / `MSG1` blocks, text commands `FH`, `R`, `W`, `CAP?`, `VER?`). Test: `python test/ionos.py` against the emulated board `test/mock_ionos.js`.
 
