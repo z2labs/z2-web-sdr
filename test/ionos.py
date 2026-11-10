@@ -40,7 +40,11 @@ async def main():
         marker2 = await pg.inner_text("#markerRead"); print("marker:", marker2)
         cmds = await pg.evaluate("window.__ionos.cmds"); print("board saw:", cmds)
         ok = ok and tune2.startswith("Scan 1 MHz") and "433.9" in marker2 and any(c.startswith("W433775,1000,") for c in cmds)
-        print("stats:", [await pg.inner_text(s) for s in ["#stFps", "#stFrames", "#stLost", "#stCrc", "#stRestarts"]])
+        stats = [await pg.inner_text(s) for s in ["#stFps", "#stFrames", "#stLost", "#stCrc", "#stRestarts"]]
+        print("stats:", stats)
+        # seq restarts at 0 on R/W/W0: counted as restarts, never as lost blocks
+        ok = ok and stats[2] == "0" and int(stats[4]) >= 1
+        brand = await pg.inner_text("#brandDev"); print("brand:", brand); ok = ok and brand.lower() == "ionos sdr"
         await pg.screenshot(path="test/ionos.png")
         await pg.click("#connectBtn"); await pg.wait_for_timeout(1500)
         cmds = await pg.evaluate("window.__ionos.cmds")

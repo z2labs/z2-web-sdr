@@ -52,9 +52,9 @@
     if (t === "CAP?") hello();
     else if (t === "VER?") msg(0, "OK\nfw_esp=test-1\nfw_fg23=0.1\nboard=BRD4265B\n");
     else if (t.startsWith("FH")) { st.freqHz = +t.slice(2); msg(0, "OK\nf=" + st.freqHz + " (F" + Math.round(st.freqHz / 1e3) + " + o0)\n"); }
-    else if (t.startsWith("R")) { let R = Math.round(FS_IN / +t.slice(1)); R = R < 3 ? 2 : R < 6 ? 4 : Math.max(8, Math.round(R / 8) * 8); st.decim = R; msg(0, "OK\nfs=" + (FS_IN / R) + " decim=" + R + "\n"); startStream(); }
-    else if (t === "W0") { st.scan = null; msg(0, "OK\nforwarded: W0\n"); startStream(); }
-    else if (t.startsWith("W")) { const p = t.slice(1).split(","); st.scan = { centerHz: +p[0] * 1e3, spanHz: +p[1] * 1e3, nbin: +p[2] }; msg(0, "OK\nforwarded: " + t + "\n"); startStream(); }
+    else if (t.startsWith("R")) { let R = Math.round(FS_IN / +t.slice(1)); R = R < 3 ? 2 : R < 6 ? 4 : Math.max(8, Math.round(R / 8) * 8); st.decim = R; seq = 0; msg(0, "OK\nfs=" + (FS_IN / R) + " decim=" + R + "\n"); startStream(); }
+    else if (t === "W0") { st.scan = null; seq = 0; msg(0, "OK\nforwarded: W0\n"); startStream(); }
+    else if (t.startsWith("W")) { const p = t.slice(1).split(","); st.scan = { centerHz: +p[0] * 1e3, spanHz: +p[1] * 1e3, nbin: +p[2] }; seq = 0; msg(0, "OK\nforwarded: " + t + "\n"); startStream(); }
     else if (t.startsWith("MODE")) msg(0, "OK\nmode=" + t.slice(4).trim() + "\n");
     else msg(0, "ERR unknown command: " + t + "\n");
   }

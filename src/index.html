@@ -249,7 +249,7 @@ input[type=number].short { width: 64px; flex: 0 0 64px; }
 <body>
 <div class="app" id="app">
   <header class="top">
-    <div class="brand"><b>Z2 Web SDR</b><span>ESP32-S3</span></div>
+    <div class="brand"><b>Z2 Web SDR</b><span id="brandDev">ESP32-S3</span></div>
     <div class="readout" title="Scroll or tap the upper/lower half of a digit to tune">
       <div class="digits" id="digits" role="group" aria-label="Centre frequency"></div>
       <span class="unit">MHz</span>
@@ -857,7 +857,12 @@ class IonosSource {
   }
 
   onIq(b, off, seq, nsamp, decim, fs) {
-    if (this.nextSeq >= 0 && seq !== this.nextSeq) this.stats.lost += (seq - this.nextSeq) >>> 0;
+    if (this.nextSeq >= 0 && seq !== this.nextSeq) {
+      // The firmware restarts seq at 0 on every stream restart (R, W, W0): a jump backwards (or a
+      // huge one) is a restart, not 4 billion lost blocks.
+      const d = (seq - this.nextSeq) | 0;
+      if (d > 0 && d < 1000000) this.stats.lost += d; else this.stats.restarts++;
+    }
     this.nextSeq = (seq + 1) >>> 0;
     this.decim = decim || this.decim; this.fsIn = (fs & 0xFFFFF) || this.fsIn;
     let r = (fs >>> 20) & 0xFFF; if (r & 0x800) r -= 0x1000; this.rssi = r;
@@ -1492,6 +1497,7 @@ function applyDevice(dev) {
     state.byDev = state.byDev || {};
     state.byDev[DEV.id] = { freqHz: state.freqHz, span: state.span, bins: state.bins, step: state.step };
     DEV = dev; FMIN = dev.fmin; FMAX = dev.fmax;
+    { const bd = document.getElementById("brandDev"); if (bd) bd.textContent = dev.name; }
     const m = state.byDev[dev.id] || {};
     state.freqHz = m.freqHz || dev.defFreq; state.span = m.span || dev.defSpan; if (m.bins) state.bins = m.bins; if (m.step) state.step = m.step;
     if (wgl) { wgl.rows = 0; wgl.alloc(Math.max(WH, 1024)); }
