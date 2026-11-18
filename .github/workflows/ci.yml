@@ -21,11 +21,12 @@ jobs:
           python -m playwright install --with-deps chromium
       - name: index.html matches src/ and fw/
         run: python tools/build.py --check
-      - name: Unit tests (SPC1 parser, MD5, SLIP)
+      - name: Unit tests (SPC1 parser, MD5, SLIP, HackRF sweep parser)
         run: |
           python test/gen.py
           node test/run.mjs
           node test/md5test.mjs
+          node test/hackrf.mjs
       - name: Browser tests against an emulated board
         run: |
           python test/live.py
@@ -34,3 +35,5 @@ jobs:
           python test/features.py
           python test/wrongport.py
           python test/rack.py
+          python test/ionos.py
+          python test/hackrf.py

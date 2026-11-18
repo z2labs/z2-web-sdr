@@ -1,4 +1,4 @@
-"""Build index.html from src/: inline src/flasher.js and embed the firmware bundle (gzip + base64).
+"""Build index.html from src/: inline src/flasher.js and src/hackrf.js and embed the firmware bundle (gzip + base64).
 
 Usage:
   python tools/build.py [fw_dir]     build index.html (fw_dir defaults to ./fw)
@@ -17,6 +17,9 @@ fw_dir = args_[0] if args_ else os.path.join(root, "fw")
 html = open(os.path.join(root, "src", "index.html"), encoding="utf-8").read()
 flasher = open(os.path.join(root, "src", "flasher.js"), encoding="utf-8").read()
 html = re.sub(r"(// @@flasher-begin\n).*?(// @@flasher-end)", lambda m: m.group(1) + flasher + m.group(2), html, flags=re.S)
+hackrf = open(os.path.join(root, "src", "hackrf.js"), encoding="utf-8").read()
+hackrf = hackrf.split("\nif (typeof module !== ")[0] + "\n"   # the Node export line stays in the source file only
+html = re.sub(r"(// @@hackrf-begin\n).*?(// @@hackrf-end)", lambda m: m.group(1) + hackrf + m.group(2), html, flags=re.S)
 
 flash_args = open(os.path.join(fw_dir, "flash_args"), encoding="utf-8").read().replace("\r\n", "\n")
 files = {}
