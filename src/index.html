@@ -166,6 +166,10 @@ canvas { display: block; width: 100%; height: 100%; touch-action: none; }
 .seg button + button { border-left: 1px solid var(--line); }
 .seg button.on { background: var(--raise); color: var(--fg); box-shadow: inset 0 -2px 0 var(--accent); }
 .seg button[disabled] { opacity: 0.35; cursor: default; }
+.seg.many { display: grid; grid-template-columns: repeat(4, 1fr); }      /* more than 6 choices: two rows of 4 */
+.seg.many button:nth-child(4n+1) { border-left: 0; }
+.seg.many button:nth-child(n+5) { border-top: 1px solid var(--line); }
+.row > .val:empty { display: none; }
 input[type=range] { width: 100%; accent-color: var(--accent); }
 input[type=number], select {
   height: 28px; border-radius: 6px; border: 1px solid var(--line); background: var(--bg); padding: 0 8px; min-width: 0;
@@ -214,6 +218,9 @@ details.log summary { cursor: pointer; font: 600 11px var(--font-label); letter-
 .card h3 { margin: 0; font: 600 15px var(--font-label); letter-spacing: 0.03em; color: var(--warn); }
 .card p { margin: 0; font-size: 13.5px; color: var(--fg); line-height: 1.5; }
 .card .row { justify-content: flex-end; }
+.card.wide { width: min(640px, calc(100% - 32px)); }
+.card pre { margin: 0; padding: 8px 10px; background: var(--bg); border: 1px solid var(--line); border-radius: 6px; font: 12px/1.45 var(--font-num);
+  color: var(--fg); white-space: pre-wrap; word-break: break-all; max-height: 40vh; overflow: auto; user-select: all; }
 .scrim { display: none; }
 input[type=number].short { width: 64px; flex: 0 0 64px; }
 .logstate { font: 12px var(--font-num); color: var(--accent); }
@@ -276,6 +283,13 @@ input[type=number].short { width: 64px; flex: 0 0 64px; }
       <p id="portCardText">The selected port belongs to a USB-UART bridge (CH343, CP210x, FTDI). The spectrum needs the ESP32-S3's own USB port: on a DevKit it is the connector marked USB, next to the one marked UART. Move the cable, then connect again.</p>
       <div class="row"><button class="btn small" id="portCardOk" type="button">OK</button></div>
     </div>
+    <div class="card wide" id="hrfCard" role="alertdialog" aria-labelledby="hrfCardTitle" hidden>
+      <h3 id="hrfCardTitle">Linux has not handed the HackRF to the browser yet</h3>
+      <p id="hrfCardText">Two things stand in the way on Linux: the USB device file is not writable for your user (no udev rule), and the kernel's own <code>hackrf</code> driver claims the device (libhackrf detaches it, the browser cannot). Run this once in a terminal, then unplug and replug the HackRF and connect again:</p>
+      <pre id="hrfCmd"></pre>
+      <p class="note" id="hrfSnapNote">Chromium installed from the Snap store (the Ubuntu default) also needs <code>sudo snap connect chromium:raw-usb</code>, then a browser restart. Google Chrome from the .deb does not.</p>
+      <div class="row"><button class="btn small" id="hrfCopy" type="button">Copy commands</button><button class="btn small" id="hrfCardOk" type="button">OK</button></div>
+    </div>
   </main>
   <div class="scrim" id="scrim" hidden></div>
 
@@ -287,12 +301,13 @@ input[type=number].short { width: 64px; flex: 0 0 64px; }
 
     <section class="sect">
       <h2>Source</h2>
-      <p class="note" id="srcNote">Plug the ESP32-S3 into its native USB port (the one marked USB, not UART), then press <b>Connect board</b>.</p>
+      <p class="note" id="srcNote">Plug the ESP32-S3 into its native USB port (the one marked USB, not UART), then press <b>Connect board</b>. For a HackRF One press <b>HackRF</b>.</p>
       <div class="fw" id="fwInfo">No board connected</div>
       <div class="fw" id="tuneInfo"></div>
-      <div class="row">
+      <div class="row" style="flex-wrap: wrap">
         <button class="btn small" id="demoBtn" type="button">Run demo</button>
         <button class="btn small" id="allPortsBtn" type="button" title="Pick any serial port, also USB-UART bridges">Other port…</button>
+        <button class="btn small" id="hackrfBtn" type="button" title="Connect a HackRF One over WebUSB">HackRF</button>
       </div>
       <label class="check"><input type="checkbox" id="autoConnect"> Start when a board is plugged in</label>
       <div class="fwbox" id="fwBox">
@@ -326,7 +341,11 @@ input[type=number].short { width: 64px; flex: 0 0 64px; }
       <div class="row" id="gainRow"><label for="gainIn">Gain</label><input class="grow" id="gainIn" type="range" min="0" max="82" step="1"><span class="val wide" id="gainVal"></span></div>
       <div class="row"><span class="lbl">Detector</span>
         <div class="seg" id="detSeg"><button type="button" data-v="0">Mean</button><button type="button" data-v="1">Max</button></div></div>
-      <label class="check" id="dcRow"><input type="checkbox" id="dcFix"> Remove DC per FFT on the chip</label>
+      <div class="row" data-hrf hidden><label for="hrfLna">LNA</label><input class="grow" id="hrfLna" type="range" min="0" max="40" step="8"><span class="val" id="hrfLnaVal"></span></div>
+      <div class="row" data-hrf hidden><label for="hrfVga">VGA</label><input class="grow" id="hrfVga" type="range" min="0" max="62" step="2"><span class="val" id="hrfVgaVal"></span></div>
+      <label class="check" data-hrf hidden><input type="checkbox" id="hrfAmp"> RF amplifier (+11 dB)</label>
+      <label class="check" data-hrf hidden><input type="checkbox" id="hrfBias"> Antenna port power (3.3 V)</label>
+      <label class="check" id="dcRow"><input type="checkbox" id="dcFix"> <span id="dcText">Remove DC per FFT on the chip</span></label>
     </section>
 
     <section class="sect">
@@ -392,10 +411,15 @@ input[type=number].short { width: 64px; flex: 0 0 64px; }
 // wideband RSSI scan. Everything band-specific reads the active profile.
 const DEV_ESP = { id: "espsdr", name: "ESP32-S3", fmin: 2204e6, fmax: 2804e6, spanUnit: "MHz", spanDiv: 1e6,
   spans: [[16e6, "16"], [40e6, "40"], [80e6, "80"]], steps: [[1e5, "0.1"], [1e6, "1"], [5e6, "5"], [20e6, "20"]], stepUnit: "MHz",
-  gain: true, dcFix: true, defFreq: 2437e6, defSpan: 80e6 };
+  gain: true, dcFix: true, dcText: "Remove DC per FFT on the chip", defFreq: 2437e6, defSpan: 80e6 };
 const DEV_IONOS = { id: "ionos", name: "Ionos SDR", fmin: 430e6, fmax: 440.025e6, spanUnit: "", spanDiv: 1e3,
   spans: [[50e3, "50k"], [100e3, "100k"], [200e3, "200k"], [1e6, "1M"], [5e6, "5M"], [10e6, "10M"]], steps: [[1e3, "1k"], [1e4, "10k"], [1e5, "100k"], [1e6, "1M"]], stepUnit: "",
   gain: false, dcFix: false, defFreq: 433.775e6, defSpan: 50e3 };
+// HackRF One (WebUSB): spans up to 20 MHz are the I/Q sample rate, wider ones are the firmware's sweep mode
+const DEV_HACKRF = { id: "hackrf", name: "HackRF One", fmin: 1e6, fmax: 6000e6, spanUnit: "", spanDiv: 1e6,
+  spans: [[2e6, "2M"], [4e6, "4M"], [10e6, "10M"], [20e6, "20M"], [100e6, "100M"], [500e6, "500M"], [2000e6, "2G"], [6000e6, "6G"]],
+  steps: [[1e5, "100k"], [1e6, "1M"], [1e7, "10M"], [1e8, "100M"]], stepUnit: "",
+  gain: false, dcFix: true, dcText: "Remove the DC spike (mean of each FFT block)", defFreq: 100e6, defSpan: 20e6 };
 let DEV = DEV_ESP;
 let FMIN = DEV.fmin, FMAX = DEV.fmax;
 const SPEC_FALLBACK = [[16e6,6,256,2,1],[16e6,6,1024,2,4],[16e6,6,2048,3,7],[40e6,1,256,5,3],[40e6,1,1024,5,9],
@@ -727,6 +751,7 @@ class IqFft {
     this.win = new Float32Array(n); let wsum = 0;
     for (let i = 0; i < n; i++) { const x = 2 * Math.PI * i / (n - 1); const w = 0.355768 - 0.487396 * Math.cos(x) + 0.144232 * Math.cos(2 * x) - 0.012604 * Math.cos(3 * x); this.win[i] = w; wsum += w; }
     this.norm = 1 / (wsum * 32768);   // coherent gain x full scale -> a full-scale tone reads 0 dBFS
+    this.wsum = wsum; this.pw = new Float32Array(n);
     this.rev = new Uint32Array(n); let bits = 0; while ((1 << bits) < n) bits++;
     for (let i = 0; i < n; i++) { let r = 0; for (let b = 0; b < bits; b++) r |= ((i >> b) & 1) << (bits - 1 - b); this.rev[i] = r; }
     this.cos = new Float32Array(n / 2); this.sin = new Float32Array(n / 2);
@@ -736,6 +761,29 @@ class IqFft {
   run(samples, off, invert) {
     const n = this.n, re = this.re, im = this.im, rev = this.rev, win = this.win;
     for (let i = 0; i < n; i++) { const j = rev[i]; re[j] = samples[off + 2 * i] * win[i]; im[j] = samples[off + 2 * i + 1] * win[i]; }
+    this.butterflies();
+    const db = this.db, norm = this.norm, h = n / 2;
+    for (let i = 0; i < n; i++) {
+      const k = invert ? (h - i + n) % n : (i + h) % n;        // fftshift (+ optional spectral inversion)
+      const p = (re[k] * re[k] + im[k] * im[k]) * norm * norm;
+      db[i] = p > 1e-30 ? 10 * Math.log10(p) : -300;
+    }
+    return db;
+  }
+  // Linear power per bin, fftshifted, a full-scale tone = 1.0 (full: 32768 for int16, 128 for int8).
+  // dcRemove subtracts the mean of the block first (HackRF: the LO leak sits at DC).
+  power(samples, off, full, dcRemove) {
+    const n = this.n, re = this.re, im = this.im, rev = this.rev, win = this.win;
+    let mi = 0, mq = 0;
+    if (dcRemove) { for (let i = 0; i < n; i++) { mi += samples[off + 2 * i]; mq += samples[off + 2 * i + 1]; } mi /= n; mq /= n; }
+    for (let i = 0; i < n; i++) { const j = rev[i]; re[j] = (samples[off + 2 * i] - mi) * win[i]; im[j] = (samples[off + 2 * i + 1] - mq) * win[i]; }
+    this.butterflies();
+    const pw = this.pw, g = 1 / (this.wsum * full), g2 = g * g, h = n / 2;
+    for (let i = 0; i < n; i++) { const k = (i + h) % n; pw[i] = (re[k] * re[k] + im[k] * im[k]) * g2; }
+    return pw;
+  }
+  butterflies() {
+    const n = this.n, re = this.re, im = this.im;
     for (let size = 2; size <= n; size <<= 1) {
       const half = size >> 1, step = n / size;
       for (let i = 0; i < n; i += size) {
@@ -746,13 +794,6 @@ class IqFft {
         }
       }
     }
-    const db = this.db, norm = this.norm, h = n / 2;
-    for (let i = 0; i < n; i++) {
-      const k = invert ? (h - i + n) % n : (i + h) % n;        // fftshift (+ optional spectral inversion)
-      const p = (re[k] * re[k] + im[k] * im[k]) * norm * norm;
-      db[i] = p > 1e-30 ? 10 * Math.log10(p) : -300;
-    }
-    return db;
   }
 }
 
@@ -955,6 +996,9 @@ class IonosSource {
   }
 }
 
+// @@hackrf-begin
+// @@hackrf-end
+
 // ---------------------------------------------------------------- demo source: a plausible 2.2-2.8 GHz scene
 class DemoSource {
   constructor(hooks) {
@@ -1021,14 +1065,16 @@ class DemoSource {
 // ---------------------------------------------------------------- state + persistence
 const DEFAULTS = { freqHz: 2437e6, span: 80e6, bins: 2048, gain: 60, maxHold: false, dcFix: true, ppm: 0,
   step: 1e6, zoom: 1, autoRange: true, dbMin: -85, dbMax: -20, avg: 0.3, wfRate: 310, palette: "classic", peakHold: false, split: 0.38,
-  autoConnect: true, keepAwake: true, playing: true, expMode: "snap", expN: 50, expSpan: "full", logIv: 1, rackPinned: false };
+  autoConnect: true, keepAwake: true, playing: true, expMode: "snap", expN: 50, expSpan: "full", logIv: 1, rackPinned: false,
+  hrfLna: 24, hrfVga: 20, hrfAmp: false, hrfBias: false };
 const WF_ALL = 310;   // waterfall rate slider end stop: one row per spectrum, like the desktop app
 const state = { ...DEFAULTS };
 try { Object.assign(state, JSON.parse(localStorage.getItem("z2-web-sdr") || localStorage.getItem("sdrpp-esp-web") || "{}")); } catch (e) {}
 function save() { try { localStorage.setItem("z2-web-sdr", JSON.stringify(state)); } catch (e) {} }
 // level unit of the current source: dBFS for the on-chip FFTs, dBm for the FG23 RSSI sweep (absolute, calibrated)
 const dbUnit = () => (source && source.dbUnit) ? source.dbUnit() : "dBFS";
-const srcSettings = () => ({ freqHz: state.freqHz, span: state.span, bins: state.bins, gain: state.gain, maxHold: state.maxHold, dcFix: state.dcFix, ppm: state.ppm });
+const srcSettings = () => ({ freqHz: state.freqHz, span: state.span, bins: state.bins, gain: state.gain, maxHold: state.maxHold, dcFix: state.dcFix, ppm: state.ppm,
+  lna: state.hrfLna, vga: state.hrfVga, amp: state.hrfAmp, bias: state.hrfBias });
 
 let source = null, mode = "demo";
 let marker = null;              // marker frequency (Hz) or null
@@ -1477,7 +1523,7 @@ function segInit(id, key, parse, onChange) {
 function pushSettings() { if (source) source.update(srcSettings()); }
 function resetTraces() { data.n = 0; data.avg = null; data.peak = null; viewDirty = true; resetAutoRange(); }
 function buildSeg(id, items) {
-  const seg = $(id); seg.innerHTML = "";
+  const seg = $(id); seg.innerHTML = ""; seg.classList.toggle("many", items.length > 6);
   for (const [v, label] of items) { const bt = document.createElement("button"); bt.type = "button"; bt.dataset.v = v; bt.textContent = label; seg.appendChild(bt); }
 }
 function buildSpans() {
@@ -1505,7 +1551,8 @@ function applyDevice(dev) {
   }
   state.freqHz = Math.max(FMIN, Math.min(FMAX, state.freqHz));
   $("freqIn").min = (FMIN / 1e6).toFixed(3); $("freqIn").max = (FMAX / 1e6).toFixed(3);
-  $("gainRow").hidden = !dev.gain; $("dcRow").hidden = !dev.dcFix;
+  $("gainRow").hidden = !dev.gain; $("dcRow").hidden = !dev.dcFix; if (dev.dcText) $("dcText").textContent = dev.dcText;
+  for (const el of document.querySelectorAll("[data-hrf]")) el.hidden = dev.id !== "hackrf";
   buildSpans(); buildSteps(); buildBins(); renderDigits(); resetTraces(); save();
 }
 const syncStep = segInit("stepSeg", "step", Number);
@@ -1534,6 +1581,16 @@ function initControls() {
   const gv = () => { $("gainVal").textContent = state.gain + " · " + gainDb(state.gain).toFixed(0) + " dB"; };
   gv();
   $("gainIn").addEventListener("input", () => { state.gain = Number($("gainIn").value); gv(); save(); pushSettings(); });
+  const hv = () => { $("hrfLnaVal").textContent = state.hrfLna + " dB"; $("hrfVgaVal").textContent = state.hrfVga + " dB"; };
+  $("hrfLna").value = state.hrfLna; $("hrfVga").value = state.hrfVga; hv();
+  $("hrfLna").addEventListener("input", () => { state.hrfLna = Number($("hrfLna").value); hv(); save(); pushSettings(); });
+  $("hrfVga").addEventListener("input", () => { state.hrfVga = Number($("hrfVga").value); hv(); save(); pushSettings(); });
+  $("hrfAmp").checked = state.hrfAmp; $("hrfBias").checked = state.hrfBias;
+  $("hrfAmp").addEventListener("change", () => { state.hrfAmp = $("hrfAmp").checked; save(); pushSettings(); });
+  $("hrfBias").addEventListener("change", () => { state.hrfBias = $("hrfBias").checked; save(); pushSettings(); });
+  $("hrfCardOk").addEventListener("click", () => { $("hrfCard").hidden = true; });
+  $("hrfCopy").addEventListener("click", async () => { try { await navigator.clipboard.writeText($("hrfCmd").textContent); $("hrfCopy").textContent = "Copied"; } catch (e) { $("hrfCopy").textContent = "Select and copy by hand"; } });
+  $("hackrfBtn").addEventListener("click", () => (mode === "hackrf" ? disconnect() : connectHackrf(null)));
   $("dcFix").checked = state.dcFix;
   $("dcFix").addEventListener("change", () => { state.dcFix = $("dcFix").checked; save(); pushSettings(); });
   $("autoRange").checked = state.autoRange;
@@ -1578,9 +1635,9 @@ function initControls() {
   $("csvBtn").addEventListener("click", startCapture);
   if (EMBEDDED) { $("exportSect").hidden = true; $("debugBtn").hidden = true; }   // downloads are blocked inside embedded previews
   $("rackBtn").addEventListener("click", () => { const open = !$("rack").classList.contains("open"); setRack(open); if (open) rackTouched(); });
-  $("connectBtn").addEventListener("click", () => (mode === "serial" ? disconnect() : connect(false)));
+  $("connectBtn").addEventListener("click", () => (mode === "serial" || mode === "hackrf" ? disconnect() : connect(false)));
   $("allPortsBtn").addEventListener("click", () => connect(true));
-  $("demoBtn").addEventListener("click", () => { if (mode === "serial") disconnect(); else startDemo(); });
+  $("demoBtn").addEventListener("click", () => { if (mode === "serial" || mode === "hackrf") disconnect(); else startDemo(); });
 }
 
 function markerToPeak() {
@@ -1779,6 +1836,7 @@ function binRange(n, fs, c) {
   const v = view(), f0 = c - fs / 2, bw = fs / n;
   return [Math.max(0, Math.floor((v.a - f0) / bw)), Math.min(n - 1, Math.ceil((v.b - f0) / bw) - 1)];
 }
+const csvPrefix = () => DEV.id === "espsdr" ? "esp" : DEV.id;
 const binHz = (j, n, fs, c) => Math.round(c - fs / 2 + (j + 0.5) * fs / n);
 function startCapture() {
   if (!data.n) { toast("No spectrum yet."); return; }
@@ -1805,7 +1863,7 @@ function exportTap(db, n, fs, c) {
         rows.push(binHz(j, n, fs, c) + "," + v.toFixed(2));
       }
       const what = capture.mode === "snap" ? "snapshot" : capture.mode + capture.got;
-      downloadText("esp-spectrum-" + what + "-" + stamp() + ".csv", rows.join("\n") + "\n", "text/csv");
+      downloadText(csvPrefix() + "-spectrum-" + what + "-" + stamp() + ".csv", rows.join("\n") + "\n", "text/csv");
       $("expState").textContent = "Saved " + (jb - ja + 1) + " bins";
       capture = null;
     }
@@ -1828,7 +1886,7 @@ function flushLog() {
   if (!specLog || !specLog.rows.length) return;
   const [ja, jb] = specLog.range, head = ["time_utc"];
   for (let j = ja; j <= jb; j++) head.push(binHz(j, specLog.n, specLog.fs, specLog.c));
-  downloadText("esp-spectrum-log-" + stamp() + ".csv", head.join(",") + "\n" + specLog.rows.join("\n") + "\n", "text/csv");
+  downloadText(csvPrefix() + "-spectrum-log-" + stamp() + ".csv", head.join(",") + "\n" + specLog.rows.join("\n") + "\n", "text/csv");
   specLog.rowsTotal += specLog.rows.length; specLog.rows = []; specLog.files++;
 }
 function startLog() {
@@ -1842,19 +1900,20 @@ function stopLog() {
 }
 
 // ---------------------------------------------------------------- debug report
-const PAGE_VERSION = "0.4.0";
+const PAGE_VERSION = "0.5.0";
 window.addEventListener("error", (e) => log("[JS] " + e.message + " @ " + (e.filename || "").split("/").pop() + ":" + e.lineno));
 window.addEventListener("unhandledrejection", (e) => log("[JS] unhandled: " + ((e.reason && e.reason.message) || e.reason)));
 function exportDebug() {
   const st = source ? source.stats : {}, bv = fwState.bundle || {};
   let portInfo = "none";
-  try { const p = boardPort || (source && source.port); if (p) { const i = p.getInfo(); portInfo = "VID " + (i.usbVendorId || 0).toString(16) + " PID " + (i.usbProductId || 0).toString(16); } } catch (e) {}
+  if (mode === "hackrf" && source && source.dev) portInfo = "USB " + source.dev.vendorId.toString(16) + ":" + source.dev.productId.toString(16) + " " + (source.dev.productName || "");
+  else try { const p = boardPort || (source && source.port); if (p) { const i = p.getInfo(); portInfo = "VID " + (i.usbVendorId || 0).toString(16) + " PID " + (i.usbProductId || 0).toString(16); } } catch (e) {}
   const lines = [
     "Z2 Web SDR debug report " + new Date().toISOString(),
     "page: " + PAGE_VERSION + ", bundled firmware " + (bv.build_date || "-") + " " + (bv.revision || "").slice(0, 7),
     "browser: " + navigator.userAgent,
     "screen: " + screen.width + "x" + screen.height + " @" + (window.devicePixelRatio || 1) + ", window " + innerWidth + "x" + innerHeight,
-    "web serial: " + ("serial" in navigator) + ", wake lock: " + ("wakeLock" in navigator) + ", embedded: " + EMBEDDED,
+    "web serial: " + ("serial" in navigator) + ", webusb: " + ("usb" in navigator) + ", wake lock: " + ("wakeLock" in navigator) + ", embedded: " + EMBEDDED,
     "mode: " + mode + ", port: " + portInfo + ", firmware: " + (source && source.fwInfo ? source.fwInfo : "-") + (source && source.fwBuild ? " (" + source.fwBuild + ")" : ""),
     "caps: " + (source && source.caps ? source.caps.trim() : "-"),
     "stats: " + JSON.stringify({ frames: st.frames, lost: st.lost, crc: st.crc, bytes: st.bytes, restarts: st.restarts }),
@@ -1870,7 +1929,7 @@ function checkPortKind(port) {
   return true;
 }
 async function autoStart(port) {
-  if (!state.autoConnect || mode === "serial" || connecting || flashing) return;
+  if (!state.autoConnect || mode === "serial" || mode === "hackrf" || connecting || flashing) return;
   try { if (port.getInfo().usbVendorId !== 0x303a) return; } catch (e) { return; }
   log("board found, starting");
   await connect(false, port, true);
@@ -1880,7 +1939,7 @@ if (navigator.serial) navigator.serial.addEventListener("connect", (e) => { setT
 // ---------------------------------------------------------------- sources
 const hooks = {
   onSpectrum,
-  onStatus: (k, t) => { setStatus(k, t); if (k === "err" && mode === "serial") { mode = "none"; $("connectLabel").textContent = "Connect"; } },
+  onStatus: (k, t) => { setStatus(k, t); if (k === "err" && (mode === "serial" || mode === "hackrf")) { mode = "none"; $("hackrfBtn").textContent = "HackRF"; $("connectLabel").textContent = "Connect"; } },
   log,
   onInfo: (src) => { $("fwInfo").textContent = "Firmware " + src.fwInfo; },
   onReset: () => resetTraces()
@@ -1953,6 +2012,7 @@ async function connect(anyPort, existingPort, quiet) {
     return;
   }
   if (prev && prev.stop) prev.stop();
+  if (prev instanceof HackRfSource) { try { await prev.close(); } catch (e) {} $("hackrfBtn").textContent = "HackRF"; }
   source = s; mode = "serial"; boardPort = s.port;
   const isIonos = s instanceof IonosSource;
   fwState.needs = !isIonos && (s.fwInfo.startsWith("old") || (!!s.fwBuild && !!fwState.bundle && s.fwBuild < (fwState.bundle.build_timestamp || "")));
@@ -1968,12 +2028,68 @@ async function connect(anyPort, existingPort, quiet) {
 }
 async function disconnect() {
   const s = source; mode = "none";
-  $("connectLabel").textContent = "Connect"; document.querySelector("#connectBtn .wide-only").hidden = false;
+  $("connectLabel").textContent = "Connect"; $("hackrfBtn").textContent = "HackRF"; document.querySelector("#connectBtn .wide-only").hidden = false;
   setStatus("busy", "Closing");
   if (s && s.close) await s.close();
   startDemo();
 }
 if (navigator.serial) navigator.serial.addEventListener("disconnect", () => { if (mode === "serial") { log("board unplugged"); disconnect(); } });
+
+// ---------------------------------------------------------------- HackRF (WebUSB)
+const IS_LINUX = /Linux/.test(navigator.userAgent) && !/Android/.test(navigator.userAgent);
+const HRF_LINUX_CMD = [
+  "echo 'SUBSYSTEM==\"usb\", ATTR{idVendor}==\"1d50\", ATTR{idProduct}==\"6089|604b|cc15\", MODE=\"0666\", TAG+=\"uaccess\"' | sudo tee /etc/udev/rules.d/60-z2-hackrf.rules",
+  "echo 'blacklist hackrf' | sudo tee /etc/modprobe.d/z2-hackrf.conf",
+  "sudo modprobe -r hackrf; sudo udevadm control --reload-rules && sudo udevadm trigger"].join("\n");
+function hackrfErrorText(e) {
+  const m = (e && (e.name + ": " + e.message)) || String(e);
+  if (e && e.name === "NotFoundError") return "No HackRF selected.";
+  if (EMBEDDED && e && e.name === "SecurityError") return "USB access is blocked in this embedded preview. Open the page file in Chrome or Edge.";
+  if (IS_LINUX && /access denied|SecurityError|claim|NetworkError|InvalidState/i.test(m)) return "Linux has not given the HackRF to the browser (" + m + "). See the commands on screen.";
+  if (/claim|NetworkError|InvalidState/i.test(m)) return "The HackRF is busy or has another driver: close SDR++, hackrf_* tools or other programs that use it. On Windows it must use WinUSB (the HackRF's own default); if Zadig switched it to libusbK or libusb0, switch it back to WinUSB. (" + m + ")";
+  if (/access denied|SecurityError/i.test(m)) return "The browser may not open this USB device (" + m + ").";
+  return "HackRF: " + m;
+}
+async function connectHackrf(existing, quiet) {
+  if (!HackRfSource.supported()) {
+    if (!quiet) $("srcNote").innerHTML = "This browser has no WebUSB. Use <b>Chrome</b> or <b>Edge</b> (Windows, macOS, Linux, Android) and open this page from a file or an https address.";
+    return;
+  }
+  if (connecting || flashing) return;
+  const prev = source, s = new HackRfSource(hooks);
+  setStatus("busy", "Connecting");
+  connecting = true; updateFwUi(); $("connectBtn").disabled = true; $("hackrfBtn").disabled = true; rackTouched();
+  try { await s.connect(existing); }
+  catch (e) {
+    connecting = false; $("connectBtn").disabled = false; $("hackrfBtn").disabled = false; updateFwUi();
+    const msg = hackrfErrorText(e);
+    log("hackrf connect failed: " + ((e && (e.name + ": " + e.message)) || e));
+    if (!(quiet && e && e.name === "NotFoundError")) $("srcNote").textContent = msg;
+    if (IS_LINUX && !(e && e.name === "NotFoundError") && !EMBEDDED) { $("hrfCmd").textContent = HRF_LINUX_CMD; $("hrfCopy").textContent = "Copy commands"; $("hrfCard").hidden = false; }
+    setStatus(mode === "demo" ? "demo" : "err", mode === "demo" ? "Demo" : "Not connected");
+    return;
+  }
+  connecting = false; $("connectBtn").disabled = false; $("hackrfBtn").disabled = false; $("hrfCard").hidden = true;
+  if (prev && prev.stop) prev.stop();
+  if (prev && prev !== s && prev.close && mode !== "demo") { try { await prev.close(); } catch (e) {} }
+  source = s; mode = "hackrf";
+  updateFwUi();
+  applyDevice(DEV_HACKRF);
+  resetTraces(); buildBins();
+  $("demoNote").hidden = true; $("demoBtn").disabled = false; $("demoBtn").textContent = "Back to demo";
+  $("connectLabel").textContent = "Disconnect"; document.querySelector("#connectBtn .wide-only").hidden = true;
+  $("hackrfBtn").textContent = "Disconnect HackRF";
+  $("srcNote").textContent = "HackRF connected. Spans up to 20 MHz show the I/Q stream (2–20 MS/s); wider spans sweep the band in 20 MHz steps, like hackrf_sweep.";
+  setStatus("busy", "Starting");
+  if (!state.playing) { state.playing = true; save(); setPlayUi(); }
+  source.update(srcSettings());
+}
+if (navigator.usb) {
+  navigator.usb.addEventListener("disconnect", (e) => { if (mode === "hackrf" && source && source.dev === e.device) { log("HackRF unplugged"); disconnect(); } });
+  navigator.usb.addEventListener("connect", (e) => {
+    if (HackRfUsb.is(e.device) && state.autoConnect && mode !== "serial" && mode !== "hackrf" && !connecting && !flashing) setTimeout(() => connectHackrf(e.device, true), 600);
+  });
+}
 
 // ---------------------------------------------------------------- firmware update UI
 let connecting = false, boardPort = null, flashing = false, armedUntil = 0, armTimer = null, customBundle = null;
@@ -1983,7 +2099,7 @@ function fwLabel() { const v = customBundle ? customBundle.version : fwState.bun
 function updateFwUi() {
   const b = $("flashBtn");
   // Never offer the ESP-SDR firmware on an Ionos carrier: its ESP32-S3 runs the ionos-sdr firmware.
-  if ((!fwState.bundle && !customBundle) || (mode === "serial" && source instanceof IonosSource)) { $("fwBox").hidden = true; return; }
+  if ((!fwState.bundle && !customBundle) || (mode === "serial" && source instanceof IonosSource) || mode === "hackrf") { $("fwBox").hidden = true; return; }
   $("fwBox").hidden = false;
   const v = fwState.bundle;
   $("fwBundleInfo").textContent = customBundle ? "Selected build: " + (customBundle.version.build_date || "custom") + " " + (customBundle.version.revision || "").slice(0, 7) + " (" + customBundle.images.length + " images)"
@@ -2006,6 +2122,7 @@ async function startFlash() {
   let port = boardPort, ok = false, msg = "";
   try {
     if (mode === "serial" && source && source.port) { port = source.port; await source.close(); }
+    else if (mode === "hackrf" && source) { await source.close(); $("hackrfBtn").textContent = "HackRF"; }
     if (source && source.stop) source.stop();
     mode = "flash"; setStatus("busy", "Flashing"); $("connectLabel").textContent = "Connect";
     if (!port) port = await navigator.serial.requestPort({ filters: UART_VIDS.map((v) => ({ usbVendorId: v })) });
@@ -2057,6 +2174,7 @@ if (state.freqHz < FMIN || state.freqHz > FMAX) {
 }
 startDemo();
 requestAnimationFrame(tick);
+if (navigator.usb && !EMBEDDED) navigator.usb.getDevices().then((ds) => { const d = ds.find((x) => HackRfUsb.is(x)); if (d && state.autoConnect && mode === "demo" && !connecting) connectHackrf(d, true); }).catch(() => {});
 if (navigator.serial && !EMBEDDED) navigator.serial.getPorts().then((ports) => { const p = ports.find((x) => { try { return x.getInfo().usbVendorId === 0x303a; } catch (e) { return false; } }); if (p) autoStart(p); }).catch(() => {});
 </script>
 </body>
